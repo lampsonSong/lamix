@@ -818,6 +818,7 @@ class Agent:
             _notify = self.reflect_notify_callback
             try:
                 from src.core.reflection import _llm_client as _injected_llm
+                from src.core.reflection import mark_reflection_done
                 llm = _injected_llm
                 if llm is None:
                     # fallback: 用 agent 自己的 llm client
@@ -830,6 +831,7 @@ class Agent:
                     skill_activated=list(self.skills.keys())[0] if self.skills else None,
                     recent_context=self._format_messages_for_context(incremental_messages),
                 )
+                mark_reflection_done()  # 反思完成后更新冷却时间
                 if learnings:
                     hints = execute_learnings(learnings)
                     if hints:
@@ -841,6 +843,7 @@ class Agent:
                 elif _notify:
                     _notify("📝 反思完成，暂无新内容需要沉淀")
             except Exception as e:
+                mark_reflection_done()  # 失败后也要更新冷却时间
                 logger.warning(f"[后台反思] 失败: {e}")
                 if _notify:
                     _notify(f"反思失败: {e}")

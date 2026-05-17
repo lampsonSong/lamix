@@ -275,10 +275,19 @@ def should_reflect(
         logger.info(f"[反思] 跳过：tool_call_count={tool_call_count} < 3")
         return False
 
-    # 触发反思
+    # 触发反思（冷却时间由 mark_reflection_done 在反思完成后更新）
     logger.info(f"[反思] 触发：tool_call_count={tool_call_count} >= 3")
-    _last_reflect_time = now
     return True
+
+
+
+
+def mark_reflection_done() -> None:
+    """反思完成后更新冷却时间。由 agent.py 在反思线程结束时调用。"""
+    global _last_reflect_time
+    import time
+    _last_reflect_time = time.time()
+    logger.info(f"[反思] 冷却时间已更新（距上次 {time.time() - _last_reflect_time:.0f}s）")
 
 
 
