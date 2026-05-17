@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import contextlib
 import pytest
 
 from src.core.reflection import (
@@ -345,3 +346,99 @@ def test_format_execution_summary():
     summary = format_execution_summary(plan)
     assert "find code" in summary
     assert "done" in summary
+
+
+
+# ── LLM 响应解析（各模型返回格式）──────────────────────────────────────────
+
+_THINK_OPEN = "\u300a"  # <think>
+_THINK_CLOSE = "\u300b"  # </think>
+
+
+def _mock_llm(response_content: str):
+    """构造返回指定内容的 mock LLM client。"""
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = response_content
+    mock_client.client.chat.completions.create.return_value = mock_response
+    mock_client.model = "test-model"
+    return mock_client
+
+
+class TestLLMResponseParsing:
+    """验证各模型返回格式的响应解析能力。"""
+
+    def test_plain_json(self):
+        """普通 JSON 响应（无 thinking 标签、无 markdown）。"""
+        content = '{"learnings": []}'
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert result == []
+
+    def test_markdown_code_block(self):
+        """Markdown ```json``` 包裹的响应（DeepSeek/GLM 常用）。"""
+        content = '```json\n{"learnings": [{"type": "info", "target": "test", "content": "x", "reason": "y"}]}\n```'
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert len(result) == 1
+        assert result[0]["type"] == "info"
+
+    def test_thinking_tag_single_line(self):
+        """单行 thinking 标签（<think>...</think> 与 JSON 同在一行）。"""
+        content = _THINK_OPEN + "分析中..." + _THINK_CLOSE + '{"learnings": []}'
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert result == []
+
+    def test_thinking_tag_cross_line(self):
+        """跨行 thinking 标签（DeepSeek 的典型返回，必须用 re.DOTALL 匹配）。"""
+        content = (_THINK_OPEN + "\n分析执行过程...\n" + _THINK_CLOSE +
+                   '{"learnings": []}')
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert result == []
+
+    def test_thinking_tag_with_markdown(self):
+        """thinking 标签 + markdown 代码块（组合格式）。"""
+        content = (_THINK_OPEN + "\n分析中\n" + _THINK_CLOSE +
+                   '\n```json\n{"learnings": []}\n```')
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert result == []
+
+    def test_thinking_tag_multi_line_complex(self):
+        """多行复杂 thinking 标签，中间包含换行和特殊字符。"""
+        content = (_THINK_OPEN + "\n让我逐步分析：\n1. 用户运行了多个 shell 命令\n2. 发现了一些配置问题\n结论：无新知识\n" +
+                   _THINK_CLOSE +
+                   '{"learnings": []}')
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert result == []
+
+    def test_thinking_tag_with_learnings(self):
+        """带 thinking 标签且有实际 learnings 的响应。"""
+        import json
+        learnings_payload = json.dumps([{"type": "project_update", "target": "model-platform", "content": "新配置", "reason": "发现"}])
+        content = _THINK_OPEN + "\n分析后发现了新知识\n" + _THINK_CLOSE + '{"learnings": ' + learnings_payload + '}'
+        mock = _mock_llm(content)
+        with _patch_reflect_context():
+            result = reflect_and_learn("goal", "summary", mock)
+        assert len(result) == 1
+        assert result[0]["type"] == "project_update"
+
+
+@contextlib.contextmanager
+def _patch_reflect_context():
+    """patch 掉 reflect_and_learn 中对外部文件的依赖。"""
+    p1 = patch("src.core.reflection._get_existing_skills_summary", return_value="（无）")
+    p2 = patch("src.core.reflection._get_existing_projects_summary", return_value="（无）")
+    p3 = patch("src.core.reflection._get_existing_info_summary", return_value="（无）")
+    with p1, p2, p3:
+        yield
