@@ -339,6 +339,7 @@ def reflect_and_learn(
         )
         raw = (resp.choices[0].message.content or "").strip()
         # 移除 MiniMax 等模型的 <think>...</think> thinking 标签，防止污染 JSON
+        raw = re.sub(r'<\|thinking\|>[\s\S]*?\x<\|think\|\x>', '', raw)
         raw = re.sub(r'《[\s\S]*?》', '', raw, flags=re.DOTALL)
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1]

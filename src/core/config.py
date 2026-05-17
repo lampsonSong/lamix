@@ -84,8 +84,8 @@ PROVIDER_PRESETS = {
     "3": {
         "name": "MiniMax",
         "base_url": "https://api.minimaxi.com/v1/",
-        "models": ["MiniMax-M2.5", "MiniMax-M2.7-highspeed"],
-        "default_model": "MiniMax-M2.5",
+        "models": ["MiniMax-M2.7", "MiniMax-M2.5"],
+        "default_model": "MiniMax-M2.7",
         "key_hint": "在 platform.minimaxi.com 获取",
     },
 }
