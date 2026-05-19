@@ -819,7 +819,7 @@ def _start_memory_watcher(mgr) -> None:
         state: dict[str, float] = {}
         for d in watch_dirs:
             if d.exists():
-                for p in d.glob("*.md"):
+                for p in d.rglob("*.md"):
                     state[str(p)] = p.stat().st_mtime
         return state
 

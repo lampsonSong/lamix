@@ -828,6 +828,7 @@ class Agent:
                     adapter=self.adapter,
                     skill_activated=list(self.skills.keys())[0] if self.skills else None,
                     recent_context=recent_ctx,
+                    fallback_models=self.fallback_models,
                     active_project=active_project,
                 )
                 mark_reflection_done()

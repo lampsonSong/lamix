@@ -21,10 +21,11 @@ from src.skills.manager import (
 # ─── Skill 实例化 Helper ──────────────────────────────────────────────────────
 
 def _make_skill(tmp_path: Path, skill_file_name: str = None, **meta) -> tuple:
-    """在 tmp_path 下创建平铺 skill .md 文件，返回 (Skill实例, Path)。"""
+    """在 tmp_path 下创建子目录格式 skill（skill-name/SKILL.md），返回 (Skill实例, Path)。"""
     if skill_file_name is None:
         skill_file_name = meta.get("name", "default-skill")
 
+    # fm_name 优先使用 meta 中的 name，否则用 skill_file_name
     fm_name = meta.get("name", skill_file_name)
     fm = {
         "name": fm_name,
@@ -36,8 +37,12 @@ def _make_skill(tmp_path: Path, skill_file_name: str = None, **meta) -> tuple:
         fm_parts.append(f"description: {fm['description']}")
 
     body = meta.get("body", "# Body\nContent here")
-    content = f"---\n" + "\n".join(fm_parts) + "\n---\n" + body
-    skill_file = tmp_path / f"{skill_file_name}.md"
+    content = "---\n" + "\n".join(fm_parts) + "\n---\n" + body
+    
+    # 创建子目录格式
+    skill_dir = tmp_path / skill_file_name
+    skill_dir.mkdir(exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(content, encoding="utf-8")
 
     skill = Skill(name=fm["name"], path=skill_file, meta=fm, body=body)
@@ -163,13 +168,16 @@ class TestCreateSkill:
                 description="A new skill",
             )
             assert "已创建" in result or "new-skill" in result
-            assert (tmp_path / "skills" / "new-skill.md").exists()
+            # 期望子目录格式：skills/new-skill/new-skill.md
+            assert (tmp_path / "skills" / "new-skill" / "SKILL.md").exists()
 
     def test_create_existing_skill(self, tmp_path: Path):
         skill_dir = tmp_path / "skills"
         skill_dir.mkdir()
-        # 已有平铺文件
-        (skill_dir / "existing.md").write_text("old content", encoding="utf-8")
+        # 已有子目录格式文件
+        existing_dir = skill_dir / "existing"
+        existing_dir.mkdir()
+        (existing_dir / "SKILL.md").write_text("old content", encoding="utf-8")
 
         with patch("src.skills.manager.SKILLS_DIR", skill_dir):
             result = create_skill(name="existing", description="Test")
@@ -225,8 +233,13 @@ class TestExecuteConsolidation:
 class TestLoadAllSkills:
 
     def test_load_skills_from_directory(self, tmp_path: Path):
+        """测试加载子目录格式的 skills"""
         _make_skill(tmp_path, "skill1", description="Skill 1")
         _make_skill(tmp_path, "skill2", description="Skill 2")
+
+        # 验证子目录结构存在
+        assert (tmp_path / "skill1" / "SKILL.md").exists()
+        assert (tmp_path / "skill2" / "SKILL.md").exists()
 
         empty_base = tmp_path / "empty_base"
         empty_base.mkdir()

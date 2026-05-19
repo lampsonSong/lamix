@@ -78,7 +78,7 @@ def load_all_skills() -> dict[str, Skill]:
 
     # 1. 加载 base skills（只读，随仓库版本）
     if BASE_SKILLS_DIR.exists():
-        for skill_md in sorted(BASE_SKILLS_DIR.glob("*.md")):
+        for skill_md in sorted(BASE_SKILLS_DIR.rglob("*.md")):
             skill = _parse_skill_md(skill_md)
             if skill:
                 skill._source = "base"  # type: ignore[attr-defined]
@@ -86,7 +86,7 @@ def load_all_skills() -> dict[str, Skill]:
 
     # 2. 加载 user skills（可写，覆盖同名 base）
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    for skill_md in sorted(SKILLS_DIR.glob("*.md")):
+    for skill_md in sorted(SKILLS_DIR.rglob("*.md")):
         skill = _parse_skill_md(skill_md)
         if skill:
             skill._source = "user"  # type: ignore[attr-defined]
@@ -126,13 +126,15 @@ def show_skill(name: str, skills: dict[str, Skill]) -> str:
 
 
 def create_skill(name: str, description: str = "") -> str:
-    """在 SKILLS_DIR 中创建新的 skill 文件（平铺 .md 格式）。"""
+    """在 SKILLS_DIR 中创建新的 skill 文件（子目录 SKILL.md 格式）。"""
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = re.sub(r"[^\w\-]", "_", name)
-    skill_path = SKILLS_DIR / f"{safe_name}.md"
+    skill_dir = SKILLS_DIR / safe_name
+    skill_path = skill_dir / "SKILL.md"
     if skill_path.exists():
         return f"技能 '{name}' 已存在：{skill_path}"
 
+    skill_dir.mkdir(exist_ok=True)
     content = f"""---
 name: {name}
 description: {description or name + ' 技能'}

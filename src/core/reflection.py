@@ -342,18 +342,19 @@ def run_reflection_loop(
     recent_context: str = "",
     active_project: str = "",
     max_rounds: int = 5,
+    fallback_models: list[tuple[Any, Any]] | None = None,
 ) -> list[str]:
     """执行反思 tool-calling 循环，返回沉淀摘要列表。
 
     给 LLM 提供沉淀工具，LLM 自己决定调什么。
+    支持主模型失败时自动 fallback 到备用模型。
     """
-    # 构建 system message（只做一次，不含 skills/projects 列表让 prompt 过长）
+    # 构建 system message
     system_msg = _REFLECTION_SYSTEM_PROMPT
 
-    # 构建 user message（包含任务上下文）
+    # 构建 user message
     user_content = f"## 用户目标\n{goal}\n\n## 执行过程\n{execution_summary}\n"
 
-    # 补充额外上下文
     if skill_activated:
         skill_content = _get_skill_full_content(skill_activated)
         if skill_content:
@@ -365,38 +366,70 @@ def run_reflection_loop(
     if active_project:
         user_content += f"\n## 当前操作的项目\n{active_project}（内容应沉淀到该项目的 project 文件，不要串项目）\n"
 
-    # 构建 messages（独立上下文，不复用 llm_client.messages）
     messages = [
         {"role": "system", "content": system_msg},
         {"role": "user", "content": user_content},
     ]
 
     reflection_results: list[str] = []
-    no_tool_count = 0  # 连续没有 tool_calls 的次数
+    no_tool_count = 0
+
+    # 构建 fallback 列表
+    fallback_list = fallback_models or []
+    fb_idx = 0  # 当前尝试的 fallback 索引
+    using_primary = True  # 是否仍使用主模型
 
     for round_num in range(max_rounds):
+        # 确定本轮使用的 adapter
+        if using_primary:
+            current_adapter = adapter
+            model_name = getattr(llm_client, 'model', 'unknown')
+        else:
+            # 使用 fallback
+            if fb_idx < len(fallback_list):
+                fb_llm, current_adapter = fallback_list[fb_idx]
+                model_name = getattr(fb_llm, 'model', 'unknown')
+            else:
+                # 所有 fallback 都试过了
+                current_adapter = adapter
+                model_name = getattr(llm_client, 'model', 'unknown')
+
         try:
-            resp = adapter.chat(messages, tools=_REFLECTION_TOOLS_SCHEMA, timeout=90)
+            resp = current_adapter.chat(messages, tools=_REFLECTION_TOOLS_SCHEMA, timeout=90)
         except Exception as e:
-            logger.warning(f"[反思] LLM 调用失败（round {round_num + 1}）: {e}")
-            break
+            error_msg = str(e)
+            logger.warning(f"[反思] LLM 调用失败（{model_name}, round {round_num + 1}）: {error_msg}")
+            
+            # 如果是主模型失败，切换到 fallback
+            if using_primary and fallback_list:
+                using_primary = False
+                fb_idx = 0
+                logger.info(f"[反思] 主模型失败，尝试 fallback...")
+                continue  # 继续下一轮尝试 fallback
+            
+            # 如果是 fallback 失败，尝试下一个 fallback
+            if not using_primary and fb_idx < len(fallback_list) - 1:
+                fb_idx += 1
+                logger.info(f"[反思] fallback {fb_idx - 1} 失败，尝试下一个...")
+                continue  # 继续下一轮尝试下一个 fallback
+            
+            # 所有模型都失败了
+            _notify_user(f"⚠️ 反思失败\n\n- 原因：LLM 调用失败\n- 错误：{error_msg[:100]}")
+            return []
 
         choice = resp.choices[0]
         msg_dict = choice.message.model_dump(exclude_none=True)
         messages.append(msg_dict)
 
-        # 检查 finish_reason
         finish_reason = choice.finish_reason
         parsed_tcs = _parse_tool_calls(msg_dict)
 
         if not parsed_tcs:
-            # 没有 tool_calls，LLM 可能直接回复文字了
             content = msg_dict.get("content", "").strip()
             if content and "无需沉淀" not in content:
                 logger.info(f"[反思] LLM 文字回复: {content[:100]}")
             no_tool_count += 1
             if no_tool_count >= 1:
-                # 连续没有工具调用，结束
                 break
             continue
 
@@ -415,14 +448,12 @@ def run_reflection_loop(
                     if result and result not in ("无需创建", "无需更新", "无需沉淀"):
                         reflection_results.append(result)
 
-            # 追加 tool result 到 messages
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],
                 "content": result,
             })
 
-        # 重置计数器
         no_tool_count = 0
 
     return reflection_results

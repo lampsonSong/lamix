@@ -137,7 +137,7 @@ def _scan_skills_dir() -> list[dict[str, Any]]:
             })
 
     # 向后兼容：平铺单文件 skills/<name>.md
-    for md_file in sorted(SKILLS_DIR.glob("*.md")):
+    for md_file in sorted(SKILLS_DIR.rglob("*.md")):
         if ".archived" in str(md_file):
             continue
         # 如果同名目录已存在，跳过（双层优先）

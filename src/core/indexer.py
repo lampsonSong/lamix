@@ -232,7 +232,7 @@ def _iter_skill_paths(skills_dir: Path) -> list[Path]:
                 seen.add(key)
     
     # 向后兼容：平铺单文件 skills/<name>.md
-    for md_file in skills_dir.glob("*.md"):
+    for md_file in skills_dir.rglob("*.md"):
         if md_file.name.startswith("."):
             continue
         # 如果同名目录已存在，跳过（双层优先）
