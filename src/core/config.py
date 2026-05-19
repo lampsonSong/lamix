@@ -461,3 +461,9 @@ def update_config_path(config: dict[str, Any], key: str, path: str) -> None:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
     except Exception as e:
         logger.warning("Failed to write config path %s: %s", key, e)
+
+
+# Legacy stub for run_setup_wizard (used by CLI but functionality moved elsewhere)
+def run_setup_wizard(title: str = "配置向导") -> dict:
+    """Legacy stub - setup wizard functionality moved to CLI."""
+    return load_config()
