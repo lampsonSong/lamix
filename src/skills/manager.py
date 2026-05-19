@@ -2,7 +2,7 @@
 
 Skill 格式（平铺 md）：
     ~/.lamix/skills/code-review.md
-    ~/.lamix/memory/skills/code-review.md
+    ~/.lamix/skills/code-review.md
 
     ---
     name: code-review

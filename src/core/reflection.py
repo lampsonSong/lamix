@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time as time_module
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from src.planning.steps import Plan, StepStatus
 
@@ -43,6 +43,9 @@ _skill_index: Any = None
 # 类型: list[tuple[LLMClient, BaseModelAdapter]]
 _fallback_llms: list[Any] = []
 
+# 沉淀通知回调（由 Session 初始化时注入）
+_notify_callback: Any = None
+
 
 def set_llm_client(client: Any) -> None:
     """由 Session 初始化时调用，注入当前 LLM Client。"""
@@ -62,183 +65,399 @@ def set_skill_index(index: Any) -> None:
     _skill_index = index
 
 
-def _refresh_all_indices() -> None:
-    """skill/info/project 变更后重建所有索引 + 刷新 tools 注册。静默失败。"""
-    global _skill_index
-    try:
-        # Skill 索引
-        if _skill_index is not None:
-            _skill_index.load_or_build()
-            logger.info('[反思] Skill 索引已重建')
-        else:
-            logger.debug('[反思] Skill 索引未注入，跳过')
-
-        # Project 索引
-        from src.tools import session as session_tool
-        current_session = session_tool.get_current_session()
-        if current_session and current_session.project_index is not None:
-            current_session.project_index.load_or_build()
-            if current_session.agent:
-                current_session.agent.project_index = current_session.project_index
-            logger.info('[反思] Project 索引已重建')
-
-        # Info 缓存：清掉 prompt_builder 的 _info_index_cache，下次构建时自动重建
-        from src.core import prompt_builder
-        prompt_builder._info_index_cache = None
-        logger.info('[反思] Info 缓存已清除')
-
-        # 统一刷新 skills_tools 的检索索引
-        if current_session:
-            from src.core import skills_tools as skills_tools_reg
-            skills_tools_reg.set_retrieval_indices(
-                _skill_index,
-                current_session.project_index,
-            )
-            current_session.skill_index = _skill_index
-            if current_session.agent:
-                current_session.agent.skill_index = _skill_index
-
-    except Exception as e:
-        logger.warning('[反思] 索引重建失败: %s', e)
+def set_notify_callback(cb: Any) -> None:
+    """由 Session 初始化时注入，用于向用户发送沉淀通知。"""
+    global _notify_callback
+    _notify_callback = cb
 
 
-# ── 工具注册 ────────────────────────────────────────────────────────────────
+# ── 沉淀工具 Schemas ────────────────────────────────────────────────────────
 
-REFLECT_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "reflect_and_learn",
-        "description": (
-            "任务完成后反思沉淀知识。分析本轮对话内容，判断是否有值得持久化的知识"
-            "（skill、info、project），并自动执行沉淀。"
-            "适用场景：(1) 任务完成后 (2) 激活了某个技能并发现可改进之处 "
-            "(3) 解决了复杂问题，过程中产生了可复用的方法 "
-            "(4) 探索了新项目，发现了项目信息"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "goal": {
-                    "type": "string",
-                    "description": "本轮任务的简要描述（例如：'帮用户调试API接口'、'优化数据库查询性能'）",
+_REFLECTION_TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_create",
+            "description": (
+                "创建新的可复用技能文档。适用：发现了 5+ 步骤的工作流，"
+                "且 skills 目录中没有类似的。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "技能名称：小写英文开头+小写字母/数字/连字符，如 'docker-debug', 'api-testing'",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "技能正文：包含 3+ 个明确步骤的方法论，是通用工作流，不是具体答案",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "创建原因：简短说明为什么值得创建这个技能",
+                    },
                 },
-                "execution_summary": {
-                    "type": "string",
-                    "description": "执行过程摘要（包括主要步骤、遇到的问题、解决方案等）",
-                },
-                "skill_activated": {
-                    "type": "string",
-                    "description": "本轮激活的技能名（如果有）",
-                },
+                "required": ["name", "content", "reason"],
             },
-            "required": ["goal", "execution_summary"],
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_update",
+            "description": (
+                "更新已有技能文档。适用：发现已有技能需要补充、修正或扩展。",
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "要更新的技能名称（需已在 skills 目录存在）",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "要追加的内容：方法论补充、踩坑记录、修正说明",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "更新原因：简短说明为什么更新",
+                    },
+                },
+                "required": ["name", "content", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_create",
+            "description": (
+                "为探索过的项目创建文档。适用：在某项目中发现了新的、未记录的配置、"
+                "测试结论、容器地址、API 路由等事实。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "项目名称，如 'model-platform', 'im-asr', 'lamix'",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "项目事实：配置、测试结论、部署信息等增量内容",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "创建原因",
+                    },
+                },
+                "required": ["name", "content", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_update",
+            "description": (
+                "追加内容到已有项目文档。适用：在已有项目中发现了新的事实。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "项目名称（需已存在）",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "要追加的项目事实：配置变更、测试结论、踩坑记录等",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "追加原因",
+                    },
+                },
+                "required": ["name", "content", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "info_create",
+            "description": (
+                "创建通用知识文档。适用：发现了新的、未记录的通用知识，"
+                "如服务地址、API 用法、踩坑记录，与特定项目无关。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Info 名称：小写英文开头，如 'jump-server-usage', 'feishu-api-pitfalls'",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "通用知识内容",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "创建原因",
+                    },
+                },
+                "required": ["name", "content", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "info_update",
+            "description": "追加内容到已有 Info 文档。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Info 名称（需已存在）",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "要追加的通用知识内容",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "追加原因",
+                    },
+                },
+                "required": ["name", "content", "reason"],
+            },
+        },
+    },
+]
+
+
+# ── 工具执行函数 ───────────────────────────────────────────────────────────
+
+def _skill_create(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _create_skill(name, content, reason)
+    if hint:
+        _notify_user(f"📝 **Skill 新建**\n\n- 名称：{name}\n- 原因：{reason}")
+        _refresh_all_indices()
+    return hint or "无需创建"
+
+
+def _skill_update(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _update_skill(name, content, reason)
+    if hint:
+        _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{name}\n- 原因：{reason}")
+        _refresh_all_indices()
+    return hint or "无需更新"
+
+
+def _project_create(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _create_project(name, content, reason)
+    if hint:
+        _refresh_all_indices()
+    return hint or "无需创建"
+
+
+def _project_update(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _update_project(name, content, reason)
+    if hint:
+        _refresh_all_indices()
+    return hint or "无需更新"
+
+
+def _info_create(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _create_info(name, content, reason)
+    if hint:
+        _refresh_all_indices()
+    return hint or "无需创建"
+
+
+def _info_update(args: dict[str, Any]) -> str:
+    name = args.get("name", "")
+    content = args.get("content", "")
+    reason = args.get("reason", "")
+    hint = _update_info(name, content, reason)
+    if hint:
+        _refresh_all_indices()
+    return hint or "无需更新"
+
+
+# 工具名 → 执行函数 映射
+_TOOL_RUNNERS = {
+    "skill_create": _skill_create,
+    "skill_update": _skill_update,
+    "project_create": _project_create,
+    "project_update": _project_update,
+    "info_create": _info_create,
+    "info_update": _info_update,
 }
 
 
-def tool_reflect_runner(params: dict[str, Any]) -> str:
-    """反思工具的执行函数，供 tools.py 调用。
+# ── 反思主循环（tool-calling）─────────────────────────────────────────────
 
-    Args:
-        params: 包含 goal, execution_summary, skill_activated 的参数字典
+_REFLECTION_SYSTEM_PROMPT = """你是一个知识管理助手。根据对话内容判断是否有值得持久化的知识。
 
-    Returns:
-        沉淀结果摘要
-    """
-    global _llm_client
-
-    if _llm_client is None:
-        return "[提示] 反思功能未初始化（LLM Client 未注入），跳过沉淀"
-
-    goal = params.get("goal", "")
-    execution_summary = params.get("execution_summary", "")
-    skill_activated = params.get("skill_activated")
-
-    if not goal or not execution_summary:
-        return "[提示] 反思参数不完整（goal 和 execution_summary 为必填），跳过沉淀"
-
-    try:
-        # 获取当前项目上下文（如果有）
-        active_project = ""
-        try:
-            from src.tools import session as session_tool
-            current_session = session_tool.get_current_session()
-            if current_session and hasattr(current_session, 'active_project'):
-                active_project = current_session.active_project or ""
-        except Exception:
-            pass
-
-        # 调用反思逻辑
-        learnings = reflect_and_learn(
-            goal=goal,
-            execution_summary=execution_summary,
-            llm_client=_llm_client,
-            skill_activated=skill_activated,
-            recent_context="",
-            active_project=active_project,
-        )
-
-        if not learnings:
-            return "✓ 反思完成：本轮任务无需沉淀新知识"
-
-        # 执行沉淀
-        hints = execute_learnings(learnings)
-
-        if hints:
-            summary = "\n".join(f"  - {h}" for h in hints)
-            return f"✓ 反思沉淀完成：\n{summary}"
-        else:
-            return "✓ 反思完成：沉淀操作已跳过（可能因为内容重复或不符合要求）"
-
-    except Exception as e:
-        logger.exception("反思工具执行异常")
-        return f"[错误] 反思沉淀失败: {e}"
-
-
-# ── 反思 Prompt ──────────────────────────────────────────────────────────────
-
-REFLECT_PROMPT = """你是一个知识管理助手。检查执行过程是否产生了新的、未记录的知识。
-
-## 用户目标
-{goal}
-
-## 执行过程
-{execution_summary}
-
-## 已有 Skills
-{existing_skills}
-
-## 已有 Projects
-{existing_projects}
-
-## 已有 Info
-{existing_info}
-
-请依次检查以下三个问题，只要任意一个回答"是"就产生一条 learning：
-
-1. **Skill 类型**：是否发现了新的、未记录的 5+ 步可复用工作流？→ skill_create
-2. **Project 类型**：是否在项目中发现了新的、未记录的信息（配置、测试结论、容器地址等）？→ project_update
-3. **Info 类型**：是否发现了新的、未记录的通用知识（服务地址、API 用法、踩坑记录）？→ info_create
+可用的工具：
+- skill_create / skill_update：创建或更新可复用技能（5+ 步骤的工作流方法论）
+- project_create / project_update：创建或追加项目事实（配置、测试结论、部署信息）
+- info_create / info_update：创建或追加通用知识（服务地址、API 用法、踩坑记录）
 
 判断标准：
-- skill_create: 5+ 步骤的工作流，skills 里没有的
-- project_update: 项目相关的新发现，直接追加到 project 文件
-- info_create: 通用知识的新发现，info 里没有的
+- skill：5+ 步骤的工作流，且 skills 中没有类似的
+- project：项目相关的新发现，直接追加
+- info：通用知识的新发现，info 中没有的
 
-请只输出 JSON：
-{{"learnings": []}}
-或
-{{"learnings": [{{"type": "project_update", "target": "项目名", "reason": "发现了新配置", "content": "具体内容"}}]}}
-
-注意：
-- 只要任意一个问题回答"是"就产生一条 learning
-- project_update 的 content 是增量信息，直接追加到对应项目的 md 文件
-- skill 的 content 是方法论（通用步骤），不是具体答案"""
+如果没有值得保存的，直接用文字回复"无需沉淀"。
+不要调用任何工具。"""
 
 
-# ── 是否需要反思（LLM 判断）─────────────────────────────────────────────────
+def run_reflection_loop(
+    goal: str,
+    execution_summary: str,
+    llm_client: Any,
+    adapter: Any,
+    skill_activated: str | None = None,
+    recent_context: str = "",
+    active_project: str = "",
+    max_rounds: int = 5,
+) -> list[str]:
+    """执行反思 tool-calling 循环，返回沉淀摘要列表。
 
+    给 LLM 提供沉淀工具，LLM 自己决定调什么。
+    """
+    # 构建 system message（只做一次，不含 skills/projects 列表让 prompt 过长）
+    system_msg = _REFLECTION_SYSTEM_PROMPT
+
+    # 构建 user message（包含任务上下文）
+    user_content = f"## 用户目标\n{goal}\n\n## 执行过程\n{execution_summary}\n"
+
+    # 补充额外上下文
+    if skill_activated:
+        skill_content = _get_skill_full_content(skill_activated)
+        if skill_content:
+            user_content += f"\n## 本轮激活的技能 [{skill_activated}]\n{skill_content[:2000]}\n"
+
+    if recent_context and recent_context != "（无对话记录）":
+        user_content += f"\n## 最近对话\n{recent_context[:3000]}\n"
+
+    if active_project:
+        user_content += f"\n## 当前操作的项目\n{active_project}（内容应沉淀到该项目的 project 文件，不要串项目）\n"
+
+    # 构建 messages（独立上下文，不复用 llm_client.messages）
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_content},
+    ]
+
+    reflection_results: list[str] = []
+    no_tool_count = 0  # 连续没有 tool_calls 的次数
+
+    for round_num in range(max_rounds):
+        try:
+            resp = adapter.chat(messages, tools=_REFLECTION_TOOLS_SCHEMA, timeout=90)
+        except Exception as e:
+            logger.warning(f"[反思] LLM 调用失败（round {round_num + 1}）: {e}")
+            break
+
+        choice = resp.choices[0]
+        msg_dict = choice.message.model_dump(exclude_none=True)
+        messages.append(msg_dict)
+
+        # 检查 finish_reason
+        finish_reason = choice.finish_reason
+        parsed_tcs = _parse_tool_calls(msg_dict)
+
+        if not parsed_tcs:
+            # 没有 tool_calls，LLM 可能直接回复文字了
+            content = msg_dict.get("content", "").strip()
+            if content and "无需沉淀" not in content:
+                logger.info(f"[反思] LLM 文字回复: {content[:100]}")
+            no_tool_count += 1
+            if no_tool_count >= 1:
+                # 连续没有工具调用，结束
+                break
+            continue
+
+        # 执行 tool calls
+        for tc in parsed_tcs:
+            tool_name = tc["name"]
+            if tool_name not in _TOOL_RUNNERS:
+                result = f"[错误] 未知工具：{tool_name}"
+            else:
+                try:
+                    args = json.loads(tc["arguments"]) if isinstance(tc["arguments"], str) else tc["arguments"]
+                except Exception:
+                    result = f"[错误] 工具参数解析失败"
+                else:
+                    result = _TOOL_RUNNERS[tool_name](args)
+                    if result and result not in ("无需创建", "无需更新", "无需沉淀"):
+                        reflection_results.append(result)
+
+            # 追加 tool result 到 messages
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+
+        # 重置计数器
+        no_tool_count = 0
+
+    return reflection_results
+
+
+def _parse_tool_calls(msg_dict: dict[str, Any]) -> list[dict[str, Any]]:
+    """从 assistant message 中解析出 tool_calls 列表。"""
+    tcs = msg_dict.get("tool_calls", [])
+    if not tcs:
+        return []
+    result = []
+    for tc in tcs:
+        fn = tc.get("function", {})
+        result.append({
+            "id": tc.get("id", str(uuid.uuid4())),
+            "name": fn.get("name", ""),
+            "arguments": fn.get("arguments", "{}"),
+        })
+    return result
+
+
+# ── 飞书通知 ───────────────────────────────────────────────────────────────
+
+
+def _notify_user(message: str) -> None:
+    """通过用户当前渠道发送通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
+    global _notify_callback
+    if _notify_callback:
+        try:
+            _notify_callback(message)
+            return
+        except Exception:
+            pass
+    # Fallback: print
+    logger.info(f"[反思] {message}")
 
 
 # ── 公开接口 ─────────────────────────────────────────────────────────────────
@@ -259,10 +478,9 @@ def should_reflect(
     触发条件：tool_call_count >= 3（任意 3 次以上工具调用）
     冷却控制：距上次反思不足 5 分钟则跳过。
     """
-    import time
     global _last_reflect_time
 
-    now = time.time()
+    now = time_module.time()
     elapsed = now - _last_reflect_time
 
     # 冷却期内 → 跳过
@@ -275,176 +493,62 @@ def should_reflect(
         logger.info(f"[反思] 跳过：tool_call_count={tool_call_count} < 3")
         return False
 
-    # 触发反思（冷却时间由 mark_reflection_done 在反思完成后更新）
+    # 触发反思
     logger.info(f"[反思] 触发：tool_call_count={tool_call_count} >= 3")
     return True
-
-
 
 
 def mark_reflection_done() -> None:
     """反思完成后更新冷却时间。由 agent.py 在反思线程结束时调用。"""
     global _last_reflect_time
-    import time
-    _last_reflect_time = time.time()
-    logger.info(f"[反思] 冷却时间已更新（距上次 {time.time() - _last_reflect_time:.0f}s）")
+    _last_reflect_time = time_module.time()
+    logger.info(f"[反思] 冷却时间已更新")
 
 
+# ── 索引刷新 ────────────────────────────────────────────────────────────────
 
-def reflect_and_learn(
-    goal: str,
-    execution_summary: str,
-    llm_client: Any,
-    skill_activated: str | None = None,
-    recent_context: str = "",
-    active_project: str = "",
-) -> list[dict[str, Any]]:
-    """执行反思，返回 learnings 列表。调用方负责后续的沉淀执行。"""
-    existing_skills = _get_existing_skills_summary()
-    existing_projects = _get_existing_projects_summary()
-    existing_info = _get_existing_info_summary()
 
-    # 构建反思上下文
-    extra_context = ""
-    # 如果有 skill 被激活，补充 skill 全文
-    if skill_activated:
-        skill_summary = _get_skill_full_content(skill_activated)
-        if skill_summary:
-            extra_context += "\n## 本轮激活的技能 [{}]\n{}".format(skill_activated, skill_summary)
-    # 补充最近对话上下文（让 LLM 看到用户反馈）
-    if recent_context and recent_context != "（无对话记录）":
-        extra_context += "\n## 最近对话\n{}".format(recent_context)
-
-    # 注入当前操作的项目（防止沉淀到错误的项目）
-    if active_project:
-        extra_context += "\n## 当前操作的项目\n{}（内容应沉淀到该项目的 project 文件，不要串项目）".format(active_project)
-
-    prompt = REFLECT_PROMPT.format(
-        goal=goal,
-        execution_summary=execution_summary,
-        existing_skills=existing_skills,
-        existing_projects=existing_projects,
-        existing_info=existing_info,
-    ) + extra_context
-
-    def _call_reflect_llm(target_llm: Any) -> list[dict[str, Any]]:
-        """调用单个 LLM 执行反思，返回 learnings 列表。"""
-        import re
-
-        resp = target_llm.client.chat.completions.create(
-            model=target_llm.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2048,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        # 移除 MiniMax 等模型的 <think>...</think> thinking 标签，防止污染 JSON
-        raw = re.sub(r'<\|thinking\|>[\s\S]*?\x<\|think\|\x>', '', raw)
-        raw = re.sub(r'《[\s\S]*?》', '', raw, flags=re.DOTALL)
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            raw = raw.rsplit("```", 1)[0].strip()
-        result = json.loads(raw)
-        return result.get("learnings", [])
-
-    # 主模型
+def _refresh_all_indices() -> None:
+    """skill/info/project 变更后重建所有索引 + 刷新 tools 注册。静默失败。"""
+    global _skill_index
     try:
-        return _call_reflect_llm(llm_client)
-    except Exception as e:
-        logger.warning(f"反思 LLM {llm_client.model} 调用失败: {e}")
-
-    # Fallback 降级
-    global _fallback_llms
-    all_failed = True
-    for fb_llm, _ in _fallback_llms:
-        try:
-            logger.info(f"反思 fallback 使用: {fb_llm.model}")
-            learnings = _call_reflect_llm(fb_llm)
-            all_failed = False
-            if learnings:
-                return learnings
-        except Exception as e2:
-            logger.warning(f"反思 fallback {fb_llm.model} 失败: {e2}")
-
-    if all_failed:
-        # 所有模型都失败了，只记录日志，不阻塞主流程
-        logger.warning("反思失败：主模型和所有 fallback 均调用失败")
-        return []
-
-
-def execute_learnings(learnings: list[dict[str, Any]]) -> list[str]:
-    """执行沉淀操作，返回人类可读的提示列表。"""
-    hints: list[str] = []
-
-    for learning in learnings:
-        ltype = learning.get("type", "")
-        target = learning.get("target", "")
-        content = learning.get("content", "")
-        reason = learning.get("reason", "")
-
-        if ltype == "project_create":
-            hint = _create_project(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _refresh_all_indices()
-
-        elif ltype == "project_update":
-            hint = _update_project(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _refresh_all_indices()
-
-        elif ltype == "skill_create":
-            hint = _create_skill(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _notify_user(f"📝 **Skill 新建**\n\n- 名称：{target}\n- 原因：{reason}")
-                _refresh_all_indices()
-
-        elif ltype == "skill_update":
-            hint = _update_skill(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _notify_user(f"🔧 **Skill 更新**\n\n- 名称：{target}\n- 原因：{reason}")
-                _refresh_all_indices()
-
-        elif ltype == "info_create":
-            hint = _create_info(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _refresh_all_indices()
-
-        elif ltype == "info_update":
-            hint = _update_info(target, content, reason)
-            if hint:
-                hints.append(hint)
-                _refresh_all_indices()
-
+        # Skill 索引
+        if _skill_index is not None:
+            _skill_index.load_or_build()
+            logger.info("[反思] Skill 索引已重建")
         else:
-            logger.warning(f"未知的学习类型: {ltype}，跳过")
+            logger.debug("[反思] Skill 索引未注入，跳过")
 
-    return hints
-
-
-# ── 飞书通知 ────────────────────────────────────────────────────────────────
-
-
-def _notify_user(message: str) -> None:
-    """通过用户当前渠道发送通知（skill 变更时调用）。静默失败，不阻塞主流程。"""
-    try:
+        # Project 索引
         from src.tools import session as session_tool
         current_session = session_tool.get_current_session()
-        if current_session and current_session.partial_sender:
-            current_session.partial_sender(message)
-            logger.info("[反思] 通知已通过当前渠道发送")
-            return
-    except Exception:
-        pass
-    # Fallback: print
-    logger.info(f"[反思] {message}")
+        if current_session and current_session.project_index is not None:
+            current_session.project_index.load_or_build()
+            if current_session.agent:
+                current_session.agent.project_index = current_session.project_index
+            logger.info("[反思] Project 索引已重建")
+
+        # Info 缓存：清掉 prompt_builder 的 _info_index_cache
+        from src.core import prompt_builder
+        prompt_builder._info_index_cache = None
+        logger.info("[反思] Info 缓存已清除")
+
+        # 统一刷新 skills_tools 的检索索引
+        if current_session:
+            from src.core import skills_tools as skills_tools_reg
+            skills_tools_reg.set_retrieval_indices(
+                _skill_index,
+                current_session.project_index,
+            )
+            current_session.skill_index = _skill_index
+            if current_session.agent:
+                current_session.agent.skill_index = _skill_index
+
+    except Exception as e:
+        logger.warning("[反思] 索引重建失败: %s", e)
 
 
-# ── 沉淀执行 ─────────────────────────────────────────────────────────────────
+# ── 沉淀执行函数（复用原有实现）──────────────────────────────────────────────
 
 
 def _create_project(target: str, content: str, reason: str) -> str | None:
@@ -475,7 +579,6 @@ def _update_project(target: str, content: str, reason: str) -> str | None:
         return _create_project(target, content, reason)
 
     existing = project_file.read_text(encoding="utf-8")
-    # 简单追加：如果已有内容里已经包含这段新内容，跳过
     if content.strip() in existing:
         return None
 
@@ -483,18 +586,6 @@ def _update_project(target: str, content: str, reason: str) -> str | None:
     project_file.write_text(updated + "\n", encoding="utf-8")
     logger.info(f"已更新项目: {target} ({reason})")
     return f"已更新项目: {target}（{reason}）"
-
-
-def _get_existing_info_summary() -> str:
-    """获取已有 info 列表摘要。"""
-    if not INFO_DIR.exists():
-        return "(无)"
-    lines = []
-    for info_file in sorted(INFO_DIR.glob("*.md")):
-        content = info_file.read_text(encoding="utf-8")
-        first_line = content.split("\n")[0].lstrip("# ").strip()
-        lines.append(f"- {info_file.stem}: {first_line}")
-    return "\n".join(lines) if lines else "(无)"
 
 
 def _create_info(target: str, content: str, reason: str) -> str | None:
@@ -525,7 +616,6 @@ def _update_info(target: str, content: str, reason: str) -> str | None:
         return _create_info(target, content, reason)
 
     existing = info_file.read_text(encoding="utf-8")
-    # 简单追加：如果已有内容里已经包含这段新内容，跳过
     if content.strip() in existing:
         return None
 
@@ -536,7 +626,9 @@ def _update_info(target: str, content: str, reason: str) -> str | None:
 
 
 def _create_skill(
-    target: str, content: str, reason: str
+    target: str,
+    content: str,
+    reason: str,
 ) -> str | None:
     """创建新的 skill 文件（平铺 .md 格式）。带格式校验。"""
     if not target or not content:
@@ -548,14 +640,14 @@ def _create_skill(
         return None
 
     # 至少包含 3 个编号步骤或标题步骤
-    numbered_steps = len(re.findall(r'^\s*\d+[.、）)]', content, re.MULTILINE))
-    heading_steps = len(re.findall(r'^\s*##\s+步骤|^\s*##\s+Step|^\s*###\s+\d', content, re.MULTILINE))
+    numbered_steps = len(re.findall(r"^\s*\d+[.、）)]", content, re.MULTILINE))
+    heading_steps = len(re.findall(r"^\s*##\s+步骤|^\s*##\s+Step|^\s*###\s+\d", content, re.MULTILINE))
     if numbered_steps + heading_steps < 3:
         logger.info(f"Skill {target} 步骤不足（{numbered_steps + heading_steps} < 3），跳过创建")
         return None
 
     # 名称校验：小写英文开头+小写字母/数字/连字符
-    if not re.match(r'^[a-z][a-z0-9-]*$', target):
+    if not re.match(r"^[a-z][a-z0-9-]*$", target):
         logger.info(f"Skill 名称不规范: {target}，跳过创建")
         return None
 
@@ -565,7 +657,6 @@ def _create_skill(
     frontmatter = f"---\ncreated_at: '{date.today()}'\nname: {target}\ndescription: {content[:200]}\n---\n\n{content}"
     skill_path.write_text(frontmatter, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
-
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
 
 
@@ -601,24 +692,9 @@ def _update_skill(target: str, content: str, reason: str) -> str | None:
 def _content_already_exists(existing: str, new_content: str) -> bool:
     """检查新内容是否已在现有 skill 中。"""
     stripped = new_content.strip()
-    # 简单检测：是否完全包含（允许空格差异）
     normalized_new = re.sub(r"\s+", "", stripped)
     normalized_existing = re.sub(r"\s+", "", existing)
     return normalized_new in normalized_existing
-
-
-def _get_existing_skills_summary() -> str:
-    """获取已有 skills 列表摘要。"""
-    if not SKILLS_DIR.exists():
-        return "(无)"
-    lines = []
-    for skill_file in sorted(SKILLS_DIR.glob("*.md")):
-        if skill_file.name == ".archived":
-            continue
-        first_lines = skill_file.read_text(encoding="utf-8").split("\n")[:4]
-        desc = " ".join(l.lstrip("-# ") for l in first_lines if l.strip())[:120]
-        lines.append(f"- {skill_file.stem}: {desc}")
-    return "\n".join(lines) if lines else "(无)"
 
 
 def _get_skill_full_content(skill_name: str) -> str:
@@ -627,18 +703,6 @@ def _get_skill_full_content(skill_name: str) -> str:
     if not skill_file.exists():
         return ""
     return skill_file.read_text(encoding="utf-8")
-
-
-def _get_existing_projects_summary() -> str:
-    """获取已有 projects 列表摘要。"""
-    if not PROJECTS_DIR.exists():
-        return "(无)"
-    lines = []
-    for proj_file in sorted(PROJECTS_DIR.glob("*.md")):
-        content = proj_file.read_text(encoding="utf-8")
-        first_line = content.split("\n")[0].lstrip("# ").strip()
-        lines.append(f"- {proj_file.stem}: {first_line}")
-    return "\n".join(lines) if lines else "(无)"
 
 
 def format_execution_summary(plan: Plan) -> str:
@@ -650,7 +714,3 @@ def format_execution_summary(plan: Plan) -> str:
         icon = "✓" if step.status == StepStatus.done else "✗" if step.status == StepStatus.failed else "○"
         lines.append(f"  {icon} {step.action}")
     return "\n".join(lines)
-
-
-# ── Skill 自动合并 ─────────────────────────────────────────────────────────
-

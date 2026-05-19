@@ -780,10 +780,9 @@ class Agent:
         """end turn 后判断是否需要后台反思沉淀。
 
         用 should_reflect() 做短路判断，通过后起后台线程执行
-        reflect_and_learn + execute_learnings，不阻塞用户回复。
+        run_reflection_loop，不阻塞用户回复。
         """
-        from src.core.reflection import should_reflect, reflect_and_learn, execute_learnings
-        from src.core.reflection import _llm_client as _get_llm
+        from src.core.reflection import should_reflect
 
         tool_count = self._fast_path_tool_count
 
@@ -814,36 +813,36 @@ class Agent:
         execution_summary = f"本轮调用了 {len(tool_names)} 次工具：{', '.join(tool_names)}" if tool_names else "本轮无工具调用"
 
         def _run_reflection():
-            """后台线程：调用 reflect_and_learn 并执行沉淀。"""
+            """后台线程：调用 run_reflection_loop 执行沉淀。"""
             _notify = self.reflect_notify_callback
             try:
-                from src.core.reflection import _llm_client as _injected_llm
-                from src.core.reflection import mark_reflection_done
-                llm = _injected_llm
-                if llm is None:
-                    # fallback: 用 agent 自己的 llm client
-                    llm = self.llm
+                from src.core.reflection import mark_reflection_done, run_reflection_loop
 
-                learnings = reflect_and_learn(
+                active_project = self._infer_active_project()
+                recent_ctx = self._format_messages_for_context(incremental_messages)
+
+                hints = run_reflection_loop(
                     goal=user_input[:200],
                     execution_summary=execution_summary,
-                    llm_client=llm,
+                    llm_client=self.llm,
+                    adapter=self.adapter,
                     skill_activated=list(self.skills.keys())[0] if self.skills else None,
-                    recent_context=self._format_messages_for_context(incremental_messages),
+                    recent_context=recent_ctx,
+                    active_project=active_project,
                 )
-                mark_reflection_done()  # 反思完成后更新冷却时间
-                if learnings:
-                    hints = execute_learnings(learnings)
-                    if hints:
-                        logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
-                        if _notify:
-                            _notify(f"📝 反思沉淀完成:\n" + "\n".join(f"  • {h}" for h in hints))
-                    elif _notify:
-                        _notify("📝 反思完成，暂无新内容需要沉淀")
+                mark_reflection_done()
+                if hints:
+                    logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
+                    if _notify:
+                        _notify(f"📝 反思沉淀完成:\n" + "\n".join(f"  • {h}" for h in hints))
                 elif _notify:
                     _notify("📝 反思完成，暂无新内容需要沉淀")
             except Exception as e:
-                mark_reflection_done()  # 失败后也要更新冷却时间
+                try:
+                    from src.core.reflection import mark_reflection_done
+                    mark_reflection_done()
+                except Exception:
+                    pass
                 logger.warning(f"[后台反思] 失败: {e}")
                 if _notify:
                     _notify(f"反思失败: {e}")

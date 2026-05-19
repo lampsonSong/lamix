@@ -810,7 +810,7 @@ def _get_feishu_credentials(config_path) -> tuple[str, str]:
 
 
 def _start_memory_watcher(mgr) -> None:
-    """监听 memory/skills、memory/projects、memory/info 目录的 .md 文件变化，自动刷新索引。"""
+    """监听 skills、projects、info 目录的 .md 文件变化，自动刷新索引。"""
     from src.core.config import SKILLS_DIR, PROJECTS_DIR, INFO_DIR
 
     watch_dirs = [SKILLS_DIR, PROJECTS_DIR, INFO_DIR]
