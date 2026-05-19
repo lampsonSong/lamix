@@ -106,9 +106,7 @@ _REFLECTION_TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "skill_update",
-            "description": (
-                "更新已有技能文档。适用：发现已有技能需要补充、修正或扩展。",
-            ),
+            "description": "更新已有技能文档。适用：发现已有技能需要补充、修正或扩展。",
             "parameters": {
                 "type": "object",
                 "properties": {

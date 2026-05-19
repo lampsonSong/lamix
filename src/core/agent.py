@@ -464,8 +464,6 @@ class Agent:
         raise LLMFatalError("所有模型（含 fallback）均调用失败")
 
     def _run_tool_loop(self) -> str:
-        self._fast_path_tool_count = 0
-
         while True:
             for round_num in range(self.max_tool_rounds):
                 try:
@@ -718,6 +716,7 @@ class Agent:
     def run(self, user_input: str) -> str:
         """处理一轮用户输入，返回最终回复文本。"""
         self._consecutive_llm_failures = 0  # 新增：每次新任务开始时重置
+        self._fast_path_tool_count = 0  # 跨轮次重置，确保反思计数涵盖所有 tool loop
 
         self.llm.add_user_message(user_input)
         try:
