@@ -9,9 +9,7 @@ from typing import Any
 import yaml
 
 LAMIX_DIR = Path.home() / ".lamix"
-SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
-PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
-INFO_DIR = LAMIX_DIR / "memory" / "info"
+SKILLS_DIR = LAMIX_DIR / "skills"
 
 # Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects/info 使用
 _active_skill_index: Any = None
@@ -181,12 +179,10 @@ def _get_skill_entry_by_name(name: str) -> dict[str, Any] | None:
     from src.core.prompt_builder import _scan_skills_dir
 
     entries = _scan_skills_dir()
+    name_lower = name.lower()
     for e in entries:
         skill_name = str(e.get("name", "")).lower()
-        if skill_name == name.lower():
-            return e
-        # 模糊匹配
-        if skill_name == name.lower():
+        if skill_name == name_lower:
             return e
     return None
 
@@ -335,36 +331,124 @@ def _run_skill_search(params: dict[str, Any]) -> str:
             if subdir_path.is_dir():
                 files_to_search.extend(subdir_path.glob("*.md"))
 
-        for fp in files_to_search:
+        all_text = ""
+        for f in files_to_search:
             try:
-                content = fp.read_text(encoding="utf-8")
+                raw = f.read_text(encoding="utf-8")
+                # 去 frontmatter
+                _, body = _parse_frontmatter(raw)
+                all_text += f"\n\n{body}"
             except OSError:
-                continue
-            if not content.strip():
-                continue
+                pass
 
-            # 在 name + description + body 中匹配
-            meta, body = _parse_frontmatter(content)
-            name = str(meta.get("name", "")) or fp.stem
-            desc = str(meta.get("description", ""))
-            blob = f"{name}\n{desc}\n{body}"
-            blob_lower = blob.lower()
+        score = 0.0
+        if skill_name.lower() == q_lower:
+            score = 2.0
+        elif q_lower in skill_name.lower():
+            score = 1.5
+        elif q_lower in all_text.lower():
+            score = 1.0
 
-            if q_lower not in blob_lower:
-                continue
+        if score > 0:
+            results.append((score, all_text))
 
-            # 命中出现在靠前位置时加分
-            pos = blob_lower.index(q_lower)
-            score = 1.0 - (pos / max(len(blob_lower), 1))
-            results.append((score, content))
+    results.sort(key=lambda x: -x[0])
+    top = results[:top_k]
 
-    results.sort(key=lambda x: x[0], reverse=True)
-    top_results = [content for _, content in results[:top_k]]
+    if not top:
+        return f"[提示] 没有找到与「{query}」相关的技能"
 
-    if not top_results:
-        return "未找到匹配的技能。"
-    return "\n\n---\n\n".join(top_results)
+    lines = [f"--- 匹配度 {s:.1f} ---  {c[:500]}" for s, c in top]
+    return "\n\n".join(lines)
 
+
+# ── Skill 增删改 ────────────────────────────────────────────────────────────
+
+def _create_skill(name: str, description: str, body: str = "") -> str:
+    """在 skills/ 下创建子目录结构（SKILL.md）。"""
+    skill_dir = SKILLS_DIR / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / _SKILL_ENTRY_FILE
+
+    if skill_path.exists():
+        return f"[错误] 技能「{name}」已存在"
+
+    meta = {
+        "name": name,
+        "description": description,
+        "invocation_count": 0,
+        "created_at": str(__import__("datetime").date.today()),
+    }
+    _write_skill_with_frontmatter(skill_path, meta, body)
+    _refresh_all_indices()
+    return f"[成功] 创建技能「{name}」，路径：{skill_path}"
+
+
+def _update_skill(name: str, body: str) -> str:
+    """更新 skill 文件（保留 frontmatter）。"""
+    path, is_sub_item = _resolve_skill_path(name)
+    if path is None or not path.is_file():
+        return f"[错误] 未找到技能「{name}」"
+
+    from src.core.prompt_builder import _parse_frontmatter
+    meta, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    meta["updated_at"] = str(__import__("datetime").date.today())
+    _write_skill_with_frontmatter(path, meta, body)
+    _refresh_all_indices()
+    return f"[成功] 更新技能「{name}」"
+
+
+def _archive_skill(name: str) -> str:
+    """归档 skill（移到 .archived/）。"""
+    path, _ = _resolve_skill_path(name)
+    if path is None or not path.is_file():
+        return f"[错误] 未找到技能「{name}」"
+
+    archive_dir = SKILLS_DIR / ".archived"
+    archive_dir.mkdir(exist_ok=True)
+    dest = archive_dir / path.name
+    path.rename(dest)
+    _refresh_all_indices()
+    return f"[成功] 归档技能「{name}」"
+
+
+# ── Archive ──────────────────────────────────────────────────────────────────
+
+def _write_skill_with_frontmatter(path: Path, meta: dict[str, Any], body: str) -> None:
+    """写 frontmatter + body 到文件。"""
+    fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False)
+    path.write_text(f"---\n{fm}---\n{body}", encoding="utf-8")
+
+
+def _refresh_all_indices() -> None:
+    """skill 变更后刷新所有相关索引。"""
+    try:
+        # Skill 索引
+        from src.core.prompt_builder import _scan_skills_dir
+        _scan_skills_dir.cache_clear()  # type: ignore[attr-defined]
+
+        # Project / Info 缓存
+        from src.core import prompt_builder
+        if hasattr(prompt_builder, "_project_index"):
+            proj = getattr(prompt_builder, "_project_index")
+            if proj and hasattr(proj, "load_or_build"):
+                proj.load_or_build()
+        prompt_builder._info_index_cache = None
+
+        # Tools 注册
+        from src.core import skills_tools as skills_tools_reg
+        from src.tools import session as session_tool
+        current_session = session_tool.get_current_session()
+        if current_session:
+            skills_tools_reg.set_retrieval_indices(
+                getattr(current_session, "skill_index", None),
+                getattr(current_session, "project_index", None),
+            )
+    except Exception:
+        pass
+
+
+# ── 统一 Skill 入口 ──────────────────────────────────────────────────────────
 
 def skill(params: dict[str, Any]) -> str:
     """统一 skill 工具入口。"""
@@ -422,7 +506,7 @@ ARCHIVE_SCHEMA = {
                 "category": {
                     "type": "string",
                     "enum": ["skill", "info", "project", "all"],
-                    "description": "要查看或恢复的类别（list 时默认 all，restore 时必填）",
+                    "description": "要查看或恢复的类别",
                 },
                 "name": {
                     "type": "string",
@@ -435,107 +519,103 @@ ARCHIVE_SCHEMA = {
 }
 
 
-def _list_archived_impl(category: str) -> str:
-    """列出所有已归档的 skills/info/projects。"""
-    from src.core.config import LAMIX_DIR
-
-    results = []
-
-    if category in ("skill", "all"):
-        archive_dir = SKILLS_DIR / ".archived"
-        if archive_dir.exists():
-            for f in sorted(archive_dir.glob("*.md")):
-                try:
-                    raw = f.read_text(encoding="utf-8")
-                    fm = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
-                    desc = ""
-                    if fm:
-                        meta = yaml.safe_load(fm.group(1)) or {}
-                        desc = meta.get("description", "")[:80]
-                    results.append(f"  📦 skill/{f.stem}: {desc}")
-                except OSError:
-                    results.append(f"  📦 skill/{f.stem}")
-
-    if category in ("info", "all"):
-        info_archive = LAMIX_DIR / "memory" / "info" / ".archived"
-        if info_archive.exists():
-            for f in sorted(info_archive.glob("*.md")):
-                results.append(f"  📦 info/{f.stem}")
-
-    if category in ("project", "all"):
-        proj_archive = LAMIX_DIR / "memory" / "projects" / ".archived"
-        if proj_archive.exists():
-            for f in sorted(proj_archive.glob("*.md")):
-                results.append(f"  📦 project/{f.stem}")
-
-    if not results:
-        return "没有归档内容。"
-
-    return "归档列表：\n" + "\n".join(results)
-
-
-def _restore_archived_impl(category: str, name: str) -> str:
-    """从归档中恢复指定 skill/info/project。"""
-    import shutil
-    from src.core.config import LAMIX_DIR
-
-    if category == "skill":
-        archive_dir = SKILLS_DIR / ".archived"
-        candidates = list(archive_dir.glob(f"{name}*.md")) if archive_dir.exists() else []
-        target_path = SKILLS_DIR / f"{name}.md"
-    elif category == "info":
-        archive_dir = LAMIX_DIR / "memory" / "info" / ".archived"
-        target_dir = LAMIX_DIR / "memory" / "info"
-        candidates = [f for f in archive_dir.glob(f"{name}*.md")] if archive_dir.exists() else []
-    elif category == "project":
-        archive_dir = LAMIX_DIR / "memory" / "projects" / ".archived"
-        target_dir = LAMIX_DIR / "memory" / "projects"
-        candidates = [f for f in archive_dir.glob(f"{name}*.md")] if archive_dir.exists() else []
-    else:
-        return f"[错误] 不支持的类别: {category}"
-
-    if not archive_dir.exists():
-        return f"[错误] {category} 归档目录不存在"
-
-    if not candidates:
-        return f"[错误] 归档中未找到: {category}/{name}"
-
-    if len(candidates) > 1:
-        names = [c.name for c in candidates]
-        return f"[错误] 匹配到多个: {names}，请更精确指定"
-
-    src = candidates[0]
-    if category == "skill":
-        dest = target_path
-    else:
-        dest = target_dir / src.name
-    if dest.exists():
-        return f"[错误] 目标已存在: {dest}，请先处理冲突"
-
-    shutil.move(str(src), str(dest))
-    return f"✓ 已恢复: {category}/{name} → {dest}"
-
-
 def archive(params: dict[str, Any]) -> str:
     """归档管理：list / restore。"""
-    action = params.get("action", "")
+    action = (params.get("action") or "").strip()
     if action == "list":
-        category = params.get("category", "all")
-        return _list_archived_impl(category)
+        return _list_archives(params.get("category", "all"))
     elif action == "restore":
-        category = params.get("category", "")
-        name = params.get("name", "").strip()
-        if not category or not name:
-            return "[错误] restore 需要 category 和 name"
-        return _restore_archived_impl(category, name)
+        return _restore_archive(params)
     else:
-        return "[错误] action 必填，可选: list, restore"
+        return "[错误] action 必须是 'list' 或 'restore'"
 
 
-# ── 向后兼容别名 ──────────────────────────────────────────────────────────
+def _list_archives(category: str) -> str:
+    """列出归档内容。"""
+    from src.core.config import PROJECTS_DIR, INFO_DIR
+    parts = []
+    if category in ("skill", "all"):
+        archive_dir = SKILLS_DIR / ".archived"
+        if archive_dir.is_dir():
+            files = sorted(archive_dir.glob("*.md"))
+            parts.append(f"### 已归档的技能 ({len(files)} 个)\n" + "\n".join(f"- {f.stem}" for f in files) if files else "(none)")
+    if category in ("project", "all"):
+        archive_dir = PROJECTS_DIR / ".archived"
+        if archive_dir.is_dir():
+            files = sorted(archive_dir.glob("*.md"))
+            parts.append(f"### 已归档的项目 ({len(files)} 个)\n" + "\n".join(f"- {f.stem}" for f in files) if files else "(none)")
+    if category in ("info", "all"):
+        archive_dir = INFO_DIR / ".archived"
+        if archive_dir.is_dir():
+            files = sorted(archive_dir.glob("*.md"))
+            parts.append(f"### 已归档的信息 ({len(files)} 个)\n" + "\n".join(f"- {f.stem}" for f in files) if files else "(none)")
+    if not parts:
+        return "没有归档内容。"
+    return "\n\n".join(parts)
+
+
+def _restore_archive(params: dict[str, Any]) -> str:
+    """从归档恢复。"""
+    from src.core.config import PROJECTS_DIR, INFO_DIR
+    category = (params.get("category") or "").strip()
+    name = (params.get("name") or "").strip()
+    if not name:
+        return "[错误] restore 需要 name 参数"
+    if category == "skill":
+        src = SKILLS_DIR / ".archived" / f"{name}.md"
+        dest = SKILLS_DIR / f"{name}.md"
+    elif category == "project":
+        src = PROJECTS_DIR / ".archived" / f"{name}.md"
+        dest = PROJECTS_DIR / f"{name}.md"
+    elif category == "info":
+        src = INFO_DIR / ".archived" / f"{name}.md"
+        dest = INFO_DIR / f"{name}.md"
+    else:
+        return "[错误] category 必须是 skill / project / info"
+
+    if not src.exists():
+        return f"[错误] 归档中未找到「{name}」"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dest)
+    _refresh_all_indices()
+    return f"[成功] 恢复「{name}」到 {dest.parent}"
+
+
+# ── Skill 快速创建（用户对话触发）────────────────────────────────────────────
+
+QUICK_CREATE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "quick_create_skill",
+        "description": "快速创建技能（用户对话触发）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["name", "description"],
+        },
+    },
+}
+
+
+def quick_create_skill(params: dict[str, Any]) -> str:
+    """快速创建技能（用户对话触发）。"""
+    name = params.get("name", "").strip()
+    description = params.get("description", "").strip()
+    body = params.get("body", "").strip()
+    if not name or not description:
+        return "[错误] name 和 description 必填"
+    return _create_skill(name, description, body)
+
+# 向后兼容别名
 def list_archived(params: dict[str, Any]) -> str:
-    return _list_archived_impl(params.get("category", "all"))
+    """list_archives 的别名。"""
+    return _list_archives(params.get("category", "all"))
 
 
 def restore_archived(params: dict[str, Any]) -> str:
-    return _restore_archived_impl(params.get("category", ""), params.get("name", "").strip())
+    """_restore_archive 的别名。"""
+    return _restore_archive(params)

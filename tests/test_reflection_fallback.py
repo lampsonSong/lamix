@@ -250,18 +250,18 @@ def test_set_fallback_llms_setters():
     reflection.set_llm_client(mock_client)
     reflection.set_fallback_llms([mock_fb1, mock_fb2])
 
-    assert reflection._llm_client is mock_client
-    assert reflection._fallback_llms == [mock_fb1, mock_fb2]
+    assert reflection._local.llm_client is mock_client
+    assert reflection._local.fallback_llms == [mock_fb1, mock_fb2]
 
 
 def test_set_fallback_llms_clears():
     """set_fallback_llms(None) 清空 fallback 列表。"""
     mock_fb = MagicMock()
     reflection.set_fallback_llms([mock_fb])
-    assert reflection._fallback_llms == [mock_fb]
+    assert reflection._local.fallback_llms == [mock_fb]
 
     reflection.set_fallback_llms(None)
-    assert reflection._fallback_llms == []
+    assert reflection._local.fallback_llms == []
 
 
 # ── should_reflect 测试 ──────────────────────────────────────────────────────
@@ -269,14 +269,14 @@ def test_set_fallback_llms_clears():
 def test_should_reflect_cooldown():
     """冷却时间内不触发反思。"""
     import time
-    reflection._last_reflect_time = time.time()
+    reflection._local.last_reflect_time = time.time()
     assert reflection.should_reflect(tool_call_count=5) is False
 
 
 def test_should_reflect_tool_call_count():
     """tool_call_count >= 3 触发反思。"""
     import time
-    reflection._last_reflect_time = 0
+    reflection._local.last_reflect_time = 0.0
     assert reflection.should_reflect(tool_call_count=0) is False
     assert reflection.should_reflect(tool_call_count=1) is False
     assert reflection.should_reflect(tool_call_count=2) is False
@@ -287,6 +287,6 @@ def test_should_reflect_tool_call_count():
 def test_mark_reflection_done():
     """mark_reflection_done 重置冷却。"""
     import time
-    reflection._last_reflect_time = time.time()
+    reflection._local.last_reflect_time = time.time()
     reflection.mark_reflection_done()
-    assert time.time() - reflection._last_reflect_time < 1
+    assert time.time() - reflection._local.last_reflect_time < 1

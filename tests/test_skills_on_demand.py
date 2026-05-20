@@ -55,7 +55,7 @@ class TestSkillIndexSearch:
 
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "search", "query": "debug"})
-        assert "debug" in result
+        assert "Debug" in result or "# Debug" in result
 
 
 class TestSkillIndexIncrementalBuild:

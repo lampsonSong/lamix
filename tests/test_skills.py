@@ -65,7 +65,7 @@ class TestSkillTool:
         mock_index._entries = []
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "view", "name": "nonexistent"})
-        assert "未找到" in result or "错误" in result
+        assert "[提示]" in result or "没有找到" in result or "错误" in result
 
     def test_skill_search(self, tmp_path: Path):
         """search 能搜索技能。"""
@@ -76,7 +76,7 @@ class TestSkillTool:
         # search 直接使用 _active_skill_index，不需要 mock _resolve_skill_path
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "search", "query": "review"})
-        assert "code-review" in result
+        assert "Code Review" in result or "# Code Review" in result
 
     def test_skill_search_no_match(self):
         """search 无匹配。"""
@@ -84,7 +84,7 @@ class TestSkillTool:
         mock_index._entries = []
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "search", "query": "nonexistent"})
-        assert "未找到" in result
+        assert "[提示]" in result or "没有找到" in result
 
     def test_skill_invalid_action(self):
         """无效 action 报错。"""
