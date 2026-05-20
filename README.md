@@ -279,19 +279,41 @@ Daemon 模式启动后通过飞书 WebSocket 接收消息，配合 watchdog 实�
 
 ### 自我审计与知识生命周期
 
-Daemon 每 4 小时检查一次是否需要审计，**每天至少执行一次**。扫描 skills、projects、info 的健康状态：
+Daemon 每天凌晨 4 点自动执行审计（硬编码，不可配置）。扫描 skills、projects、info 的健康状态：
 
 - **自动修复**：空目录清理、散落文件合并、缺失信息补全
 - **重叠检测**：发现职责重叠的 skills 并建议合并
 - **知识归档**：7 天未使用且 0 次调用→归档，30 天未使用→归档。归档不删除，移入 `archived/` 子目录
 - 报告通过飞书发送，同时持久化到 `~/.lamix/audit_reports/`
 
-可在 `~/.lamix/config.yaml` 中设置 `self_audit.enabled: false` 关闭。
+审计任务目前硬编码在代码中，不可通过配置关闭（计划未来支持）。
 
 ### Boot Tasks
 
 改了 daemon 代码需要重启时，先写 boot task 指定重启后的验证步骤。daemon 重启后自动执行验证并汇报结果，不用手动检查。
 
+
+### Safe Mode
+
+安全模式提供备份、回滚和最小化飞书交互能力，用于诊断和恢复问题状态。
+
+- **create_backup**: 创建配置快照
+- **restore_backup**: 从快照恢复
+- **list_backups**: 列出可用备份
+- **handle_feishu_message**: 最小化飞书消息处理（心跳+日志）
+- **restart_daemon**: 安全重启 daemon
+
+使用场景：排查 daemon 启动问题、恢复误配置、隔离问题排查。
+
+### Skill Audit
+
+追踪 Skill 执行过程中的步骤完成情况，帮助发现 skill 定义的缺失或不完善。
+
+- 在 skill view 时解析 SKILL.md 中的步骤
+- 在 Agent 执行时记录 tool_call 和 LLM output
+- 结束时对比步骤关键词和实际执行，生成审计报告
+
+用途：检验 skill 是否按预期工作流执行，发现遗漏步骤，持续改进 skill 质量。
 ### 后台任务
 
 Lamix 支持将耗时任务放到后台执行，不阻塞当前对话：
