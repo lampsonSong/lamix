@@ -59,6 +59,9 @@ lamix 命令 ──→ cli.py（独立 REPL，内嵌 PlatformManager）
 | Heartbeat | `src/core/heartbeat.py` | 心跳管理器 |
 | Watchdog | `src/watchdog.py` | 独立看门狗进程，监控 daemon |
 | Self-update | `src/selfupdate/updater.py` | git 分支自更新 |
+| Self Audit | `src/core/self_audit.py` | 自我审计（skills/projects/scripts/patterns 扫描，自动修复） |
+| Skill Audit | `src/core/skill_audit.py` | Skill 执行步骤追踪审计 |
+| Safe Mode | `src/safe_mode.py` | 安全模式（备份/回滚/飞书消息处理） |
 
 ---
 
@@ -80,26 +83,26 @@ lamix 命令 ──→ cli.py（独立 REPL，内嵌 PlatformManager）
 
 ## 四、工具列表
 
-| 工具名 | 功能 |
-|--------|------|
-| `shell` | 执行 shell 命令（危险命令拦截，支持 Ctrl+C 中断） |
-| `search` | ripgrep 文件名/内容搜索（mode=files/content） |
-| `file_read` | 读文件（100KB 限制） |
-| `file_write` | 写文件（自动创建父目录） |
-| `feishu_send` | 发送飞书消息（text/card） |
-| `feishu_read` | 读取飞书会话消息 |
-| `skill` | 加载/搜索技能（action=view/search，name 支持 `skill-name` 和 `skill-name/sub-item`） |
-| `skill_scripts` | 扫描 skills/*/scripts/，动态注册脚本为工具 |
-| `info` | 加载 info 知识文件 |
-| `project_context` | 加载项目上下文 |
-| `search_projects` | 语义搜索项目 |
-| `session` | 搜索/加载历史会话 |
-| `web_search` | 网页搜索 |
-| `task_schedule` | 注册定时任务（interval/cron/delayed） |
-| `task_list` | 查看定时任务 |
-| `task_cancel` | 取消定时任务 |
-| `activate_tool_group` | 按需激活工具组（desktop/vision 等） |
-| `archive` | 归档管理（list/restore） |
+| 工具名 | 功能 | 文件 |
+|--------|------|------|
+| `shell` | 执行 shell 命令（危险命令拦截，支持 Ctrl+C 中断） | `src/tools/shell.py` |
+| `search` | ripgrep 文件名/内容搜索（mode=files/content） | `src/tools/search.py` |
+| `file_read` | 读文件（100KB 限制） | `src/tools/fileops.py` |
+| `file_write` | 写文件（自动创建父目录） | `src/tools/fileops.py` |
+| `feishu_send` | 发送飞书消息（text/card） | `src/feishu/client.py` |
+| `feishu_read` | 读取飞书会话消息 | `src/feishu/client.py` |
+| `skill` | 加载/搜索技能（action=view/search，name 支持 `skill-name` 和 `skill-name/sub-item`） | `src/core/skills_tools.py` |
+| `skill_scripts` | 扫描 skills/*/scripts/，动态注册脚本为工具 | `src/tools/skill_scripts.py` |
+| `info` | 加载 info 知识文件 | `src/core/skills_tools.py` |
+| `project_context` | 加载项目上下文 | `src/core/skills_tools.py` |
+| `search_projects` | 语义搜索项目 | `src/core/skills_tools.py` |
+| `session` | 搜索/加载历史会话 | `src/tools/session.py` |
+| `web_search` | 网页搜索 | `src/tools/web.py` |
+| `task_schedule` | 注册定时任务（interval/cron/delayed） | `src/tools/task_scheduler_tool.py` |
+| `task_list` | 查看定时任务 | `src/tools/task_scheduler_tool.py` |
+| `task_cancel` | 取消定时任务 | `src/tools/task_scheduler_tool.py` |
+| `activate_tool_group` | 按需激活工具组（desktop/vision 等） | `src/core/tools.py` |
+| `archive` | 归档管理（list/restore） | `src/core/skills_tools.py` |
 
 ### 工具组（Tool Groups）
 
@@ -149,6 +152,7 @@ Tool Groups 索引只展示组名和描述。需要时通过 `activate_tool_grou
 ├── MEMORY.md                # Agent 身份 + 行为准则（500字符限制）
 ├── USER.md                  # 用户画像 + 偏好
 ├── boot_tasks.json          # 重启前待办
+├── .last_active_date        # 用户最后活跃日期（用于知识归档基准）
 ├── memory/
 │   ├── skills/              # 技能知识文档（双层目录结构）
 │   │   ├── <skill-name>/     # 每个技能一个目录
@@ -162,11 +166,12 @@ Tool Groups 索引只展示组名和描述。需要时通过 `activate_tool_grou
 │   ├── info/                # 知识文件（*.md）
 │   ├── sessions/            # 会话 JSONL
 │   │   └── tool_bodies/     # 大型工具结果
-│   └── errors.jsonl         # 错误日志
+│   └── errors.jsonl          # 错误日志
 ├── index/                   # 索引文件（skills.jsonl, projects.jsonl）
 ├── search.db                # SQLite FTS5 搜索
 ├── task_scheduler.db        # APScheduler 持久化
 ├── metrics.jsonl            # 任务指标
+├── audit_reports/           # 审计报告历史
 ├── archived/                # 归档的 skills/info/projects
 │   ├── skills/
 │   ├── projects/
@@ -227,6 +232,10 @@ skills_management:
   cleanup_max_skills: 300
   cleanup_age_days: 10
   cleanup_min_invocations: 0
+
+# 视觉模型配置（可选，用于视觉分析工具）
+# vision:
+#   model: "glm-4.6v"
 ```
 
 ---
@@ -268,6 +277,8 @@ skills_management:
 | `/cancel` | 取消任务 |
 | `/metrics` | 任务统计 |
 | `/safemode` | 安全模式 |
+| `/self-audit` | 立即触发自我审计 |
+| `/audit-report` | 查看历史审计报告 |
 | `/exit` | 退出 |
 
 ### Shell 工具特性
@@ -283,8 +294,55 @@ skills_management:
 
 ## 九、特色功能
 
+### 9.1 自我审计（Self Audit）
 
-### 9.1 Boot Tasks（重启验证）
+daemon **每天凌晨 4 点**自动执行一次审计（通过 APScheduler cron 触发）。
+
+**审计内容**：
+- `scan_skills`: 检查 skills 目录结构、frontmatter、散落文件，自动修复
+- `scan_skill_overlap`: 检测 skill 职责重叠（关键词重叠率）
+- `scan_projects`: 检查 projects 目录结构
+- `scan_skill_scripts`: 验证脚本签名规范（`def TOOL_RUNNER(params: dict) -> str:`）
+- `scan_user_patterns`: 分析用户使用习惯
+- `cleanup_stale_knowledge`: 清理过期 skill/info/project
+
+**自动修复**：
+- 空目录删除
+- 散落 .md 合并到 SKILL.md
+- 缺失 frontmatter 自动生成
+- TOOL_RUNNER 签名修正
+
+**知识归档规则**：
+- 归档基准日期为用户最后活跃日期（`.last_active_date`）
+- 7 天未使用且调用次数为 0 → 自动归档
+- 30 天未使用 → 自动归档
+- skill / info / project 三类统一归档规则
+- 归档不删除，移入 `archived/` 子目录，可恢复
+
+**报告推送**：
+- 审计结果推送飞书群聊
+- 报告持久化到 `~/.lamix/audit_reports/` 目录
+
+**可用命令**：
+- `/self-audit` — 立即触发审计
+- `/audit-report` — 列出最近 10 份历史报告
+- `/audit-report <path>` — 查看指定报告详情
+
+### 9.2 Skill 审计（Skill Audit）
+
+追踪 Skill 执行过程中的步骤完成情况，帮助发现 skill 定义的缺失或不完善。
+
+**工作原理**：
+- 在 skill view 时解析 SKILL.md 中的步骤（如 `1. 理解需求`、`## 工作流` 等）
+- 在 Agent 执行时记录 tool_call 和 LLM output
+- 结束时对比步骤关键词和实际执行，生成审计报告
+
+**用途**：
+- 检验 skill 是否按预期工作流执行
+- 发现遗漏步骤或多余步骤
+- 持续改进 skill 质量
+
+### 9.3 Boot Tasks（重启验证）
 
 改了 daemon 代码后需要重启才能生效。Boot Task 机制让你在重启前写好验证任务，daemon 重启后自动执行并汇报结果。
 
@@ -300,7 +358,7 @@ file_write("~/.lamix/boot_tasks.json", '[{"task": "验证改动：发几条消�
 
 daemon 启动后读取 boot_tasks.json，把任务注入 session 执行，完成后清空文件。
 
-### 9.2 定时任务
+### 9.4 定时任务
 
 通过 `task_schedule` 工具注册定时任务，支持三种触发方式：
 
@@ -324,39 +382,23 @@ task_schedule(action="list")
 task_schedule(action="cancel", task_id="monitor")
 ```
 
-### 9.3 自我审计与知识生命周期
+### 9.5 Safe Mode（安全模式）
 
-daemon 每天凌晨 4 点自动执行一次审计（cron 定时）。
+安全模式提供备份、回滚和最小化飞书交互能力，用于诊断和恢复问题状态。
 
-审计内容：skills/projects/skill_scripts 的健康状态扫描。
+**功能**：
+- `create_backup`: 创建配置快照
+- `restore_backup`: 从快照恢复
+- `list_backups`: 列出可用备份
+- `handle_feishu_message`: 最小化飞书消息处理（心跳+日志）
+- `restart_daemon`: 安全重启 daemon
 
-**自动修复**：空目录删除、散落 .md 合并到 SKILL.md、缺失 frontmatter 自动生成、重叠检测。
+**使用场景**：
+- 排查 daemon 启动问题
+- 恢复误配置
+- 隔离问题排查
 
-**知识归档**：
-- 归档基准日期为用户最后活跃日期（`~/.lamix/.last_active_date`），避免用户长时间不用后回来知识被错误归档
-- 7 天未使用且调用次数为 0 → 自动归档
-- 30 天未使用 → 自动归档
-- skill / info / project 三类统一归档规则
-- 归档不删除，移入 `archived/` 子目录，保留可恢复
-- `last_used_at` 在每次 skill view、info 加载、project_context 加载时自动更新
-
-**报告**：
-- 通过飞书发送审计结果
-- 报告持久化到 `~/.lamix/audit_reports/` 目录，可通过 `/audit-report` 命令查阅历史
-
-可用命令：
-- `/self-audit` — 立即触发审计
-- `/audit-report` — 列出最近 10 份历史报告
-- `/audit-report <path>` — 查看指定报告详情
-
-可在 `config.yaml` 中关闭：
-
-```yaml
-self_audit:
-  enabled: false
-```
-
-### 9.4 桌面控制（键鼠 + 截图）
+### 9.6 桌面控制（键鼠 + 截图）
 
 Lamix 可以操作鼠标键盘和截屏，实现 GUI 自动化。
 
@@ -367,7 +409,7 @@ Lamix 可以操作鼠标键盘和截屏，实现 GUI 自动化。
 
 **能力**：截图、点击、输入文字、按键、组合键、滚动、拖拽、UI 元素查询
 
-### 9.5 视觉分析
+### 9.7 视觉分析
 
 通过截图 + 视觉模型分析屏幕内容，配合桌面控制实现"看到就能操作"。
 
@@ -380,7 +422,7 @@ vision:
 
 未配置时，视觉分析工具调用会提示用户配置。
 
-### 9.6 双层 Skills 设计
+### 9.8 双层 Skills 设计
 
 #### 目录结构
 
@@ -443,7 +485,7 @@ invocation_count: 0
 - `skills/*.md`（平铺单文件）仍被识别为一个有效的 skill，等价于 `skills/xxx/SKILL.md`
 - 迁移脚本自动将旧单文件迁移到新目录结构
 
-### 9.7 Config 热重载
+### 9.9 Config 热重载
 
 daemon 运行中修改 `~/.lamix/config.yaml`（比如改了飞书配置），无需重启。daemon 每 30 秒检测配置文件变化，自动热重载飞书 adapter。
 
@@ -487,10 +529,3 @@ lamix gateway restart # 重启
 - 首次运行自动问候语
 - CLI 工具调用实时进度显示
 - Skills 双层目录结构（skills/\<name\>/SKILL.md + references/ + templates/ + scripts/ + assets/）
-- Skill view/search 支持子项路径（如 `skill(name="code-writing/references/python-patterns")`）
-
-### v0.1.x
-- 初始版本
-- 飞书 WebSocket 支持
-- 基础 CLI REPL
-- Skill/Project/Info 知识系统
