@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time as time_module
 import uuid
 from datetime import date, datetime
@@ -21,6 +22,9 @@ from src.planning.steps import Plan, StepStatus
 
 logger = logging.getLogger(__name__)
 
+# 线程局部存储
+_local = threading.local()
+
 LAMIX_DIR = Path.home() / ".lamix"
 SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
 PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
@@ -28,41 +32,27 @@ INFO_DIR = LAMIX_DIR / "memory" / "info"
 
 # 反思冷却时间（秒）：距上次反思不足此间隔则跳过
 _REFLECT_COOLDOWN = 300  # 5 分钟
-_last_reflect_time: float = 0.0
 
 # Skill 内容最短长度（字符），低于此不创建
 _MIN_SKILL_CONTENT_LEN = 80
 
-# 全局 LLM Client（由 Session 初始化时注入）
-_llm_client: Any = None
-
-# 全局 SkillIndex（由 Session 初始化时注入）
-_skill_index: Any = None
-
-# 全局 Fallback 模型列表（由 Session 初始化时注入）
-# 类型: list[tuple[LLMClient, BaseModelAdapter]]
-_fallback_llms: list[Any] = []
-
-# 沉淀通知回调（由 Session 初始化时注入）
+# 沉淀通知回调（由 Session 初始化时注入，全局共享）
 _notify_callback: Any = None
 
 
 def set_llm_client(client: Any) -> None:
     """由 Session 初始化时调用，注入当前 LLM Client。"""
-    global _llm_client
-    _llm_client = client
+    _local.llm_client = client
 
 
 def set_fallback_llms(fallback_llms: list[Any]) -> None:
     """由 Session 初始化时调用，注入 fallback 模型列表。"""
-    global _fallback_llms
-    _fallback_llms = fallback_llms or []
+    _local.fallback_llms = fallback_llms or []
 
 
 def set_skill_index(index: Any) -> None:
     """由 Session 初始化时调用，注入当前 SkillIndex，skill 变更后自动刷新索引。"""
-    global _skill_index
-    _skill_index = index
+    _local.skill_index = index
 
 
 def set_notify_callback(cb: Any) -> None:
@@ -79,8 +69,8 @@ _REFLECTION_TOOLS_SCHEMA = [
         "function": {
             "name": "skill_create",
             "description": (
-                "创建新的可复用技能文档。适用：发现了 5+ 步骤的工作流，"
-                "且 skills 目录中没有类似的。"
+                "创建新的可复用技能文档。适用：发现了 2+ 步骤的工作流（150-300 字符），"
+                "或 3+ 步骤的工作流（300 字符以上），且 skills 目录中没有类似的。"
             ),
             "parameters": {
                 "type": "object",
@@ -91,7 +81,7 @@ _REFLECTION_TOOLS_SCHEMA = [
                     },
                     "content": {
                         "type": "string",
-                        "description": "技能正文：包含 3+ 个明确步骤的方法论，是通用工作流，不是具体答案",
+                        "description": "技能正文：包含 2+ 个明确步骤的方法论（150-300 字符），或 3+ 步骤（300 字符以上），是通用工作流，不是具体答案",
                     },
                     "reason": {
                         "type": "string",
@@ -318,12 +308,12 @@ _TOOL_RUNNERS = {
 _REFLECTION_SYSTEM_PROMPT = """你是一个知识管理助手。根据对话内容判断是否有值得持久化的知识。
 
 可用的工具：
-- skill_create / skill_update：创建或更新可复用技能（5+ 步骤的工作流方法论）
+- skill_create / skill_update：创建或更新可复用技能（2+ 步骤的工作流方法论）
 - project_create / project_update：创建或追加项目事实（配置、测试结论、部署信息）
 - info_create / info_update：创建或追加通用知识（服务地址、API 用法、踩坑记录）
 
 判断标准：
-- skill：5+ 步骤的工作流，且 skills 中没有类似的
+- skill：2+ 步骤的工作流（150-300 字符），或 3+ 步骤（300 字符以上），且 skills 中没有类似的
 - project：项目相关的新发现，直接追加
 - info：通用知识的新发现，info 中没有的
 
@@ -384,35 +374,34 @@ def run_reflection_loop(
             model_name = getattr(llm_client, 'model', 'unknown')
         else:
             # 使用 fallback
-            if fb_idx < len(fallback_list):
-                fb_llm, current_adapter = fallback_list[fb_idx]
-                model_name = getattr(fb_llm, 'model', 'unknown')
-            else:
-                # 所有 fallback 都试过了
-                current_adapter = adapter
-                model_name = getattr(llm_client, 'model', 'unknown')
+            if fb_idx >= len(fallback_list):
+                # Fallback 耗尽，直接退出
+                _notify_user("⚠️ 反思失败\n\n- 原因：所有 fallback 模型均已失败")
+                return []
+            fb_llm, current_adapter = fallback_list[fb_idx]
+            model_name = getattr(fb_llm, 'model', 'unknown')
 
         try:
             resp = current_adapter.chat(messages, tools=_REFLECTION_TOOLS_SCHEMA, timeout=90)
         except Exception as e:
             error_msg = str(e)
             logger.warning(f"[反思] LLM 调用失败（{model_name}, round {round_num + 1}）: {error_msg}")
-            
+
             # 如果是主模型失败，切换到 fallback
             if using_primary and fallback_list:
                 using_primary = False
                 fb_idx = 0
                 logger.info(f"[反思] 主模型失败，尝试 fallback...")
                 continue  # 继续下一轮尝试 fallback
-            
+
             # 如果是 fallback 失败，尝试下一个 fallback
             if not using_primary and fb_idx < len(fallback_list) - 1:
                 fb_idx += 1
                 logger.info(f"[反思] fallback {fb_idx - 1} 失败，尝试下一个...")
                 continue  # 继续下一轮尝试下一个 fallback
-            
-            # 所有模型都失败了
-            _notify_user(f"⚠️ 反思失败\n\n- 原因：LLM 调用失败\n- 错误：{error_msg[:100]}")
+
+            # Fallback 耗尽，直接失败，不回退到主模型
+            _notify_user(f"⚠️ 反思失败\n\n- 原因：所有模型（主模型 + {len(fallback_list)} 个 fallback）均失败\n- 错误：{error_msg[:100]}")
             return []
 
         choice = resp.choices[0]
@@ -495,22 +484,21 @@ def _notify_user(message: str) -> None:
 def should_reflect(
     plan: Plan | None = None,
     *,
-    is_fast_path: bool = False,
     tool_call_count: int = 0,
     skill_activated: str | None = None,
     user_input: str = "",
-    llm_client: Any | None = None,
-    recent_context: str = "",
 ) -> bool:
     """判断本次任务是否需要反思。
 
     触发条件：tool_call_count >= 3（任意 3 次以上工具调用）
     冷却控制：距上次反思不足 5 分钟则跳过。
+
+    注意：plan, skill_activated, user_input 参数保留以兼容调用方，但当前未使用。
     """
-    global _last_reflect_time
+    last_reflect_time = getattr(_local, 'last_reflect_time', 0.0)
 
     now = time_module.time()
-    elapsed = now - _last_reflect_time
+    elapsed = now - last_reflect_time
 
     # 冷却期内 → 跳过
     if elapsed < _REFLECT_COOLDOWN:
@@ -529,8 +517,7 @@ def should_reflect(
 
 def mark_reflection_done() -> None:
     """反思完成后更新冷却时间。由 agent.py 在反思线程结束时调用。"""
-    global _last_reflect_time
-    _last_reflect_time = time_module.time()
+    _local.last_reflect_time = time_module.time()
     logger.info(f"[反思] 冷却时间已更新")
 
 
@@ -539,11 +526,11 @@ def mark_reflection_done() -> None:
 
 def _refresh_all_indices() -> None:
     """skill/info/project 变更后重建所有索引 + 刷新 tools 注册。静默失败。"""
-    global _skill_index
     try:
         # Skill 索引
-        if _skill_index is not None:
-            _skill_index.load_or_build()
+        skill_index = getattr(_local, 'skill_index', None)
+        if skill_index is not None:
+            skill_index.load_or_build()
             logger.info("[反思] Skill 索引已重建")
         else:
             logger.debug("[反思] Skill 索引未注入，跳过")
@@ -565,13 +552,14 @@ def _refresh_all_indices() -> None:
         # 统一刷新 skills_tools 的检索索引
         if current_session:
             from src.core import skills_tools as skills_tools_reg
+            skill_index = getattr(_local, 'skill_index', None)
             skills_tools_reg.set_retrieval_indices(
-                _skill_index,
+                skill_index,
                 current_session.project_index,
             )
-            current_session.skill_index = _skill_index
+            current_session.skill_index = skill_index
             if current_session.agent:
-                current_session.agent.skill_index = _skill_index
+                current_session.agent.skill_index = skill_index
 
     except Exception as e:
         logger.warning("[反思] 索引重建失败: %s", e)
@@ -663,17 +651,28 @@ def _create_skill(
     if not target or not content:
         return None
 
-    # 内容至少 300 字符
-    if len(content.strip()) < 300:
-        logger.info(f"Skill {target} 内容过短（{len(content.strip())}字符 < 300），跳过创建")
+    content_len = len(content.strip())
+
+    # 最低门槛：150 字符以下直接拒绝
+    if content_len < 150:
+        logger.info(f"Skill {target} 内容过短（{content_len} 字符 < 150），跳过创建")
         return None
 
-    # 至少包含 3 个编号步骤或标题步骤
+    # 计算步骤数
     numbered_steps = len(re.findall(r"^\s*\d+[.、）)]", content, re.MULTILINE))
     heading_steps = len(re.findall(r"^\s*##\s+步骤|^\s*##\s+Step|^\s*###\s+\d", content, re.MULTILINE))
-    if numbered_steps + heading_steps < 3:
-        logger.info(f"Skill {target} 步骤不足（{numbered_steps + heading_steps} < 3），跳过创建")
-        return None
+    total_steps = numbered_steps + heading_steps
+
+    if content_len < 300:
+        # 简短技能：150-300 字符，至少 2 个步骤
+        if total_steps < 2:
+            logger.info(f"Skill {target} 步骤不足（{total_steps} < 2，内容 {content_len} 字符 < 300），跳过创建")
+            return None
+    else:
+        # 标准技能：>= 300 字符，至少 3 个步骤
+        if total_steps < 3:
+            logger.info(f"Skill {target} 步骤不足（{total_steps} < 3，内容 {content_len} 字符 >= 300），跳过创建")
+            return None
 
     # 名称校验：小写英文开头+小写字母/数字/连字符
     if not re.match(r"^[a-z][a-z0-9-]*$", target):
@@ -683,7 +682,9 @@ def _create_skill(
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
     skill_path = SKILLS_DIR / f"{target}.md"
 
-    frontmatter = f"---\ncreated_at: '{date.today()}'\nname: {target}\ndescription: {content[:200]}\n---\n\n{content}"
+    # 安全生成 YAML frontmatter：清理换行和特殊字符，用引号包裹
+    description = content[:200].replace('\n', ' ').replace('\r', ' ').replace('\\', '\\\\').replace('"', '\\"')
+    frontmatter = f"---\ncreated_at: '{date.today()}'\nname: {target}\ndescription: \"{description}\"\n---\n\n{content}"
     skill_path.write_text(frontmatter, encoding="utf-8")
     logger.info(f"已创建技能: {target} ({reason})")
     return f"已创建技能: {target}（以后遇到类似问题会自动使用）"
