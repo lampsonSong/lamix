@@ -225,6 +225,22 @@ _REFLECTION_TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "no_deposition_needed",
+            "description": "表示本轮对话没有值得持久化的知识，明确调用此工具而非直接文字回复",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "简短说明为什么无需沉淀",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -258,6 +274,7 @@ def _project_create(args: dict[str, Any]) -> str:
     reason = args.get("reason", "")
     hint = _create_project(name, content, reason)
     if hint:
+        _notify_user(f"📦 **Project 新建**\n\n- 名称：{name}\n- 原因：{reason}")
         _refresh_all_indices()
     return hint or "无需创建"
 
@@ -268,6 +285,7 @@ def _project_update(args: dict[str, Any]) -> str:
     reason = args.get("reason", "")
     hint = _update_project(name, content, reason)
     if hint:
+        _notify_user(f"🔧 **Project 更新**\n\n- 名称：{name}\n- 原因：{reason}")
         _refresh_all_indices()
     return hint or "无需更新"
 
@@ -278,6 +296,7 @@ def _info_create(args: dict[str, Any]) -> str:
     reason = args.get("reason", "")
     hint = _create_info(name, content, reason)
     if hint:
+        _notify_user(f"💡 **Info 新建**\n\n- 名称：{name}\n- 原因：{reason}")
         _refresh_all_indices()
     return hint or "无需创建"
 
@@ -288,8 +307,13 @@ def _info_update(args: dict[str, Any]) -> str:
     reason = args.get("reason", "")
     hint = _update_info(name, content, reason)
     if hint:
+        _notify_user(f"🔧 **Info 更新**\n\n- 名称：{name}\n- 原因：{reason}")
         _refresh_all_indices()
     return hint or "无需更新"
+
+
+def _no_deposition_needed(args: dict[str, Any]) -> str:
+    return "无需沉淀"
 
 
 # 工具名 → 执行函数 映射
@@ -300,6 +324,7 @@ _TOOL_RUNNERS = {
     "project_update": _project_update,
     "info_create": _info_create,
     "info_update": _info_update,
+    "no_deposition_needed": _no_deposition_needed,
 }
 
 
@@ -311,14 +336,14 @@ _REFLECTION_SYSTEM_PROMPT = """你是一个知识管理助手。根据对话内�
 - skill_create / skill_update：创建或更新可复用技能（2+ 步骤的工作流方法论）
 - project_create / project_update：创建或追加项目事实（配置、测试结论、部署信息）
 - info_create / info_update：创建或追加通用知识（服务地址、API 用法、踩坑记录）
+- no_deposition_needed：表示本轮没有值得持久化的知识
 
 判断标准：
 - skill：2+ 步骤的工作流（150-300 字符），或 3+ 步骤（300 字符以上），且 skills 中没有类似的
 - project：项目相关的新发现，直接追加
 - info：通用知识的新发现，info 中没有的
 
-如果没有值得保存的，直接用文字回复"无需沉淀"。
-不要调用任何工具。"""
+**重要**：你必须至少调用一个工具。如果没有值得保存的知识，调用 no_deposition_needed 工具。不要直接用纯文字回复。"""
 
 
 def run_reflection_loop(
@@ -361,6 +386,7 @@ def run_reflection_loop(
 
     reflection_results: list[str] = []
     no_tool_count = 0
+    invalid_response_count = 0  # 连续无效响应计数器
 
     # 构建 fallback 列表
     fallback_list = fallback_models or []
@@ -413,6 +439,17 @@ def run_reflection_loop(
 
         if not parsed_tcs:
             content = msg_dict.get("content", "").strip()
+
+            # 检测无效响应（极短回复，如"好的"、"OK"等）
+            if len(content) < 5 or content.lower() in ("好的", "好", "ok", "okay"):
+                invalid_response_count += 1
+                logger.warning(f"[反思] LLM 回复无效({content})，疑似 fallback 模型能力不足（连续 {invalid_response_count} 次）")
+                if invalid_response_count >= 2:
+                    logger.warning("[反思] 连续 2 次无效响应，退出循环")
+                    break
+                continue
+
+            # 有效文字回复
             if content and "无需沉淀" not in content:
                 logger.info(f"[反思] LLM 文字回复: {content[:100]}")
             no_tool_count += 1
@@ -535,14 +572,15 @@ def _refresh_all_indices() -> None:
         else:
             logger.debug("[反思] Skill 索引未注入，跳过")
 
-        # Project 索引
+        # Project 索引：从 session_tool 模块获取当前 session 引用
         from src.tools import session as session_tool
-        current_session = session_tool.get_current_session()
-        if current_session and current_session.project_index is not None:
-            current_session.project_index.load_or_build()
-            if current_session.agent:
-                current_session.agent.project_index = current_session.project_index
-            logger.info("[反思] Project 索引已重建")
+        current_session = getattr(session_tool, '_current_session', None)
+        if current_session and hasattr(current_session, 'project_index'):
+            if current_session.project_index is not None:
+                current_session.project_index.load_or_build()
+                if hasattr(current_session, 'agent') and current_session.agent:
+                    current_session.agent.project_index = current_session.project_index
+                logger.info("[反思] Project 索引已重建")
 
         # Info 缓存：清掉 prompt_builder 的 _info_index_cache
         from src.core import prompt_builder
@@ -555,10 +593,11 @@ def _refresh_all_indices() -> None:
             skill_index = getattr(_local, 'skill_index', None)
             skills_tools_reg.set_retrieval_indices(
                 skill_index,
-                current_session.project_index,
+                current_session.project_index if hasattr(current_session, 'project_index') else None,
             )
-            current_session.skill_index = skill_index
-            if current_session.agent:
+            if hasattr(current_session, 'skill_index'):
+                current_session.skill_index = skill_index
+            if hasattr(current_session, 'agent') and current_session.agent:
                 current_session.agent.skill_index = skill_index
 
     except Exception as e:
