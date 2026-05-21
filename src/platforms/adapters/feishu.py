@@ -504,6 +504,7 @@ class FeishuAdapter(BasePlatformAdapter):
             session = self.session_manager.get_or_create("feishu", open_id)
             session.partial_sender = lambda t: self._send_reply(chat_id, t)
             session._reply_callback = lambda t: self._send_reply(chat_id, t)
+            session.set_reply_channel("feishu", chat_id)
 
             # ─── 进度卡片 worker ───────────────────────────────────────
             _progress_queue: queue.Queue[dict[str, Any]] = queue.Queue()

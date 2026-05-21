@@ -95,6 +95,11 @@ class Agent:
         """重新加载工具列表（外部注册新工具后调用）。"""
         self._tools = tool_registry.get_all_schemas()
 
+    def _load_or_refresh_skills(self) -> None:
+        """刷新 skill index，确保本次 session 能加载新建的 skill。反思完成后调用。"""
+        if self.skill_index is not None:
+            self.skill_index.load_or_build()
+
     def set_context(self) -> None:
         """设置 system prompt 上下文（启动时调用一次）。"""
         self.llm.set_system_context()
@@ -835,6 +840,8 @@ class Agent:
                     logger.info(f"[后台反思] 沉淀完成: {'; '.join(hints)}")
                     if _notify:
                         _notify(f"📝 反思沉淀完成:\n" + "\n".join(f"  • {h}" for h in hints))
+                    # 刷新 skill/index，确保本次 session 能加载新建的 skill
+                    self._load_or_refresh_skills()
                 elif _notify:
                     _notify("📝 反思完成，暂无新内容需要沉淀")
             except Exception as e:
