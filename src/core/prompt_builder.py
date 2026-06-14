@@ -314,7 +314,7 @@ def _extract_project_info(path: Path) -> tuple[str, str]:
 
 
 def build_project_index() -> str:
-    """扫描 ~/.lamix/projects/*.md，生成项目索引。"""
+    """扫描 ~/.lamix/memory/projects/*.md，生成项目索引。"""
     global _projects_index_cache
     if not PROJECTS_DIR.exists():
         _projects_index_cache = (frozenset(), "")
@@ -408,7 +408,7 @@ def _info_mtime_fingerprint() -> frozenset[tuple[str, float]]:
 
 
 def build_info_index() -> str:
-    """扫描 ~/.lamix/info/*.md，生成信息索引。"""
+    """扫描 ~/.lamix/memory/info/*.md，生成信息索引。"""
     global _info_index_cache
     if not INFO_DIR.exists():
         _info_index_cache = (frozenset(), "")

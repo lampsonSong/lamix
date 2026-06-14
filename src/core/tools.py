@@ -254,7 +254,7 @@ _register(
 # ── skill scripts 延迟加载 ──────────────────────────────────────────────
 
 def load_skill_scripts() -> None:
-    """扫描 ~/.lamix/skills/*/scripts/，注册所有包含 TOOL_SCHEMA 的脚本为工具。
+    """扫描 ~/.lamix/memory/skills/*/scripts/，注册所有包含 TOOL_SCHEMA 的脚本为工具。
 
     必须在 daemon 启动完成后调用，不能在模块初始化时调用，否则会产生循环导入：
     tools.py → skill_scripts.py → tools.py（tools 模块还未初始化完成）。

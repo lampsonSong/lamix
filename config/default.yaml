@@ -12,8 +12,9 @@ feishu:
   app_secret: ""  # 飞书应用 App Secret（可选）
 
 memory_path: "~/.lamix/memory"   # 记忆文件存储路径
-skills_path: "~/.lamix/skills"   # 技能文件存储路径
-projects_path: "~/.lamix/projects"  # 项目记录目录（.md）
+skills_path: "~/.lamix/memory/skills"   # 技能文件存储路径
+projects_path: "~/.lamix/memory/projects"  # 项目记录目录
+info_path: "~/.lamix/memory/info"   # 零散知识文件路径
 
 # Skills 管理（冷技能归档阈值）
 skills_management:

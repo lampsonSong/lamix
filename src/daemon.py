@@ -56,6 +56,27 @@ SAFE_MODE_SCRIPT = Path(__file__).resolve().parent / "safe_mode.py"
 _MAX_TASKS = 20
 _MAX_TOTAL_BYTES = 10 * 1024  # 10KB
 
+# watchdog 重启标志文件路径
+_RESTART_FLAG_PATH = LAMIX_DIR / ".restart_by_watchdog"
+
+
+def _check_restart_flag() -> tuple[int | None, bool]:
+    """检查是否被 watchdog 重启。
+
+    Returns:
+        (old_pid, was_restarted): old_pid 为发起重启的旧进程 PID（可能是 None），
+        was_restarted 表示是否检测到重启标志。
+    """
+    if not _RESTART_FLAG_PATH.exists():
+        return None, False
+    try:
+        old_pid = int(_RESTART_FLAG_PATH.read_text(encoding="utf-8").strip())
+        # 清除标志（daemon 已识别到重启状态）
+        _RESTART_FLAG_PATH.unlink()
+        return old_pid, True
+    except (ValueError, OSError):
+        return None, False
+
 
 
 def _notify_user(text: str, config: dict | None = None) -> None:
@@ -286,8 +307,14 @@ def _write_daemon_pid() -> None:
     _DAEMON_PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
 
 
-def _send_boot_notification(config: dict, pid: int) -> None:
-    """常驻上线通知：优先发 open_id 私聊，失败则发 owner_chat_id 群聊。"""
+def _send_boot_notification(config: dict, pid: int, is_recovery: bool = False) -> None:
+    """常驻上线通知：优先发 open_id 私聊，失败则发 owner_chat_id 群聊。
+
+    Args:
+        config: 飞书配置
+        pid: 当前 daemon PID
+        is_recovery: True 表示被 watchdog 重启恢复，False 表示正常上线
+    """
     owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
     user_open_id = config.get("feishu", {}).get("user_open_id", "").strip()
     app_id = config.get("feishu", {}).get("app_id", "").strip()
@@ -300,7 +327,10 @@ def _send_boot_notification(config: dict, pid: int) -> None:
     try:
         from src.feishu.client import FeishuClient
         client = FeishuClient(app_id=app_id, app_secret=app_secret)
-        text = f"Lamix 已上线 (PID={pid})"
+        if is_recovery:
+            text = f"Lamix 已重启恢复 (PID={pid})"
+        else:
+            text = f"Lamix 已上线 (PID={pid})"
 
         # 优先尝试 user_open_id 私聊（一定可以发），再试 owner_chat_id 群聊
         targets = []
@@ -743,8 +773,13 @@ def main() -> None:
     load_skill_scripts()
     logger.info("[daemon] skill scripts 已加载")
 
+    # ── 检查是否被 watchdog 重启 ────────────────────────────────────────
+    old_pid, is_recovery = _check_restart_flag()
+    if is_recovery:
+        logger.info(f"[daemon] 被 watchdog 重启恢复 (旧 PID={old_pid})")
+
     # ── 上线通知 ─────────────────────────────────────────────────────────
-    _send_boot_notification(config, pid)
+    _send_boot_notification(config, pid, is_recovery=is_recovery)
 
     # ── boot_tasks ──────────────────────────────────────────────────────
     tasks = _load_and_clear_boot_tasks()

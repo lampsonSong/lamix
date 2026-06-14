@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from src.core.config import SKILLS_DIR, PROJECTS_DIR, INFO_DIR
 
-LAMIX_DIR = Path.home() / ".lamix"
-SKILLS_DIR = LAMIX_DIR / "skills"
 
 # Session 在启动时通过 set_retrieval_indices 注入，供 skill search/search_projects/info 使用
 _active_skill_index: Any = None

@@ -1,8 +1,8 @@
-"""技能管理器：扫描 ~/.lamix/skills/，解析 skill 文件，提供加载和查询接口。
+"""技能管理器：扫描 ~/.lamix/memory/skills/，解析 skill 文件，提供加载和查询接口。
 
 Skill 格式（平铺 md）：
-    ~/.lamix/skills/code-review.md
-    ~/.lamix/skills/code-review.md
+    ~/.lamix/memory/skills/code-review.md
+    ~/.lamix/memory/skills/code-review.md
 
     ---
     name: code-review
@@ -71,7 +71,7 @@ def _parse_skill_md(path: Path) -> Skill | None:
 def load_all_skills() -> dict[str, Skill]:
     """扫描 base skills 和 user skills，加载并返回所有技能。
 
-    加载顺序：先 base（随仓库），再 user（~/.lamix/skills/）。
+    加载顺序：先 base（随仓库），再 user（~/.lamix/memory/skills/）。
     同名 skill 以 user 版本为准（覆盖 base）。
     """
     skills: dict[str, Skill] = {}

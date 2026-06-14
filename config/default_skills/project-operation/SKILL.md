@@ -41,6 +41,6 @@ triggers:
 
 审查某个项目时，审查结果属于被审查的项目，不属于审查工具。
 
-- 项目审查结论 → 写入 `~/.lamix/projects/{project_name}.md`
+- 项目审查结论 → 写入 `~/.lamix/memory/projects/{project_name}.md`
 - 不要把项目信息混进其他项目的记录里
 - 审查时先加载项目上下文（`project_context`），审查完更新回项目

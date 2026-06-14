@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
+from src.core.config import SKILLS_DIR, PROJECTS_DIR
 
 import jieba
 
@@ -871,9 +872,9 @@ def load_resume_context(session_id: str) -> str | None:
 def _resolve_archive_target(target: str) -> Path | None:
     """将 archive target 解析为文件路径。"""
     if target.startswith("skill:"):
-        return LAMIX_DIR / "skills" / f"{target[6:]}.md"
+        return SKILLS_DIR / f"{target[6:]}.md"
     elif target.startswith("project:"):
-        return LAMIX_DIR / "projects" / f"{target[8:]}.md"
+        return PROJECTS_DIR / f"{target[8:]}.md"
     return None
 
 

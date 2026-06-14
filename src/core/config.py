@@ -17,14 +17,11 @@ logger = logging.getLogger(__name__)
 LAMIX_DIR = Path.home() / ".lamix"
 CONFIG_PATH = LAMIX_DIR / "config.yaml"
 MEMORY_DIR = LAMIX_DIR / "memory"
-SKILLS_DIR = LAMIX_DIR / "skills"
+SKILLS_DIR = MEMORY_DIR / "skills"
 INDEX_DIR = LAMIX_DIR / "index"
-PROJECTS_DIR = LAMIX_DIR / "projects"
-INFO_DIR = LAMIX_DIR / "info"
+PROJECTS_DIR = MEMORY_DIR / "projects"
+INFO_DIR = MEMORY_DIR / "info"
 
-# 旧路径（迁移前）
-_OLD_SKILLS_DIR = LAMIX_DIR / "memory" / "skills"
-_OLD_PROJECTS_DIR = LAMIX_DIR / "memory" / "projects"
 
 _DEFAULT_RETRIEVAL: dict[str, Any] = {
     "skill_top_k": 3,
@@ -133,7 +130,7 @@ def ensure_dirs() -> None:
     INFO_DIR.mkdir(exist_ok=True)
     INDEX_DIR.mkdir(exist_ok=True)
 
-    _migrate_old_dirs()
+
 
 
 def _fix_config_paths() -> None:
