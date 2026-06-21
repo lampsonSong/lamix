@@ -1,7 +1,8 @@
 """Watchdog 进程：监控 daemon 心跳，超时则重启。
 
 启动方式：由 launchd 管理（独立于 daemon 的 service）。
-心跳超时（30 秒无心跳）→ 检查是否 user_stopped → 检查 Mac 是否休眠 → 否则重启 daemon。
+心跳超时 → 检查是否 user_stopped → 检测是否刚从系统睡眠恢复 → 否则重启 daemon。
+通过 watchdog 自身检测间隔的时间跳跃来判断系统是否刚从睡眠恢复。
 
 心跳文件：~/.lamix/heartbeat/<pid>.json
 """
@@ -11,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -148,69 +148,10 @@ def _restart_daemon(pm) -> None:
         _clear_restart_flag()
 
 
-def _is_mac_sleeping() -> bool:
-    """检测 Mac 是否处于休眠状态。
-
-    通过 pmset 检测：
-    1. 如果有 ' Sleep ' 行且值 > 0，说明正在休眠（有预置休眠计时器）
-    2. 如果有 ' Display Sleep ' 行且值 > 0，说明显示器已休眠
-    3. 如果 'PreventUserIdleSystemSleep' 和 'NoIdleSleepAssertion' 都为 0，
-       且没有 'UserIsActive'=1，说明系统处于无人值守的休眠状态
-
-    Returns:
-        True 表示 Mac 可能在休眠，跳过重启是安全的
-    """
-    if sys.platform != "darwin":
-        return False
-
-    try:
-        result = subprocess.run(
-            ["pmset", "-g", "assertions"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return False
-
-        output = result.stdout
-
-        # 提取各 assertion 状态
-        prevent_idle = "PreventUserIdleSystemSleep" in output
-        no_idle = "NoIdleSleepAssertion" in output
-        user_active = "UserIsActive" in output
-
-        # 如果用户活跃，系统肯定醒着
-        if user_active and not no_idle:
-            return False
-
-        # 如果没有任何 idle sleep prevention，系统可能在休眠
-        if not prevent_idle and not no_idle:
-            # 进一步检查：尝试 pmset -g 查看电源状态和 sleep timer
-            result2 = subprocess.run(
-                ["pmset", "-g"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result2.returncode == 0:
-                pmset_out = result2.stdout
-                # 检查是否有 Sleep 或 Dark Wake 计时器活跃
-                # " Sleep " 后面跟着数字表示有休眠倒计时
-                if re.search(r"(?i)^\s*Sleep\s+[1-9]", pmset_out, re.MULTILINE):
-                    return True
-                # 检查是否处于 Dark Wake / Idle Sleep 状态
-                # standby=1 表示启用了自动休眠
-                if "standby" in pmset_out.lower():
-                    # 有 standby 启用时，检查是否真的在休眠
-                    # 通过检查进程是否响应来辅助判断
-                    pass
-
-        return False
-
-    except (subprocess.SubprocessError, OSError) as e:
-        _log(f"检测 Mac 休眠状态失败: {e}")
-        return False
+# 睡眠恢复后给 daemon 的宽限期（秒），让心跳子进程有时间更新心跳文件
+SLEEP_WAKE_GRACE_PERIOD: int = 30
+# 判定系统睡眠的 watchdog 间隔倍数：实际间隔 > WATCHDOG_INTERVAL * 此倍数 → 刚从睡眠恢复
+SLEEP_DETECT_MULTIPLIER: int = 3
 
 
 class Watchdog:
@@ -220,6 +161,8 @@ class Watchdog:
         self._shutdown = threading.Event()
         self._daemon_pid: int | None = None  # 监控的 daemon pid
         self._pm = get_process_manager()  # 平台相关的进程管理器
+        self._last_check_time: float | None = None  # 上次检查的时间戳，用于检测系统睡眠
+        self._sleep_grace_until: float = 0  # 睡眠恢复后的宽限期截止时间戳
 
     def _find_daemon_pid(self) -> int | None:
         """从进程列表中找到 daemon 的 pid。"""
@@ -279,10 +222,10 @@ class Watchdog:
 
         elapsed = (datetime.now() - last).total_seconds()
         if elapsed > HEARTBEAT_TIMEOUT:
-            # 心跳超时：先检查 Mac 是否在休眠，休眠则跳过重启
-            if _is_mac_sleeping():
+            # 心跳超时：检查是否在睡眠恢复宽限期内
+            if time.time() < self._sleep_grace_until:
                 _log(f"daemon ({pid}) 心跳超时（{elapsed:.0f}s > {HEARTBEAT_TIMEOUT}s）"
-                     f"，但 Mac 正在休眠，跳过重启")
+                     f"，系统刚从睡眠恢复，宽限期内跳过重启")
                 return
             _log(f"daemon ({pid}) 心跳超时（{elapsed:.0f}s > {HEARTBEAT_TIMEOUT}s），尝试重启")
             _restart_daemon(self._pm)
@@ -319,6 +262,19 @@ class Watchdog:
             self._shutdown.wait(WATCHDOG_INTERVAL)
             if self._shutdown.is_set():
                 break
+
+            # 检测系统睡眠：如果 watchdog 自身两次检查间隔远大于正常值，
+            # 说明系统刚从睡眠恢复（睡眠时 watchdog 也被冻结）
+            now_ts = time.time()
+            if self._last_check_time is not None:
+                actual_gap = now_ts - self._last_check_time
+                expected_gap = WATCHDOG_INTERVAL * SLEEP_DETECT_MULTIPLIER
+                if actual_gap > expected_gap:
+                    self._sleep_grace_until = now_ts + SLEEP_WAKE_GRACE_PERIOD
+                    _log(f"检测到系统睡眠恢复（watchdog 间隔 {actual_gap:.0f}s >> {WATCHDOG_INTERVAL}s）"
+                         f"，daemon 宽限期 {SLEEP_WAKE_GRACE_PERIOD}s")
+            self._last_check_time = now_ts
+
             try:
                 self._check_daemon()
             except Exception as e:
