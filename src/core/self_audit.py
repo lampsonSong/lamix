@@ -328,7 +328,21 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
             ))
             continue
 
-        first_line = lines[0].strip()
+        # 跳过 frontmatter（--- ... ---）找到实际的第一个内容行
+        content_start_idx = 0
+        if lines and lines[0].strip() == "---":
+            for idx in range(1, len(lines)):
+                if lines[idx].strip() == "---":
+                    content_start_idx = idx + 1
+                    break
+
+        # 找到第一个非空行作为 first_line
+        first_line = ""
+        for idx in range(content_start_idx, len(lines)):
+            if lines[idx].strip():
+                first_line = lines[idx].strip()
+                break
+
         if not first_line.startswith("# "):
             if auto_fix:
                 new_content = "# " + name + "\n\n" + content
@@ -360,13 +374,16 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
                 message="文件几乎只有标题，内容为空或不完整",
             ))
 
-        # 检查路径是否有效（项目信息里如果有路径的话）
-        path_pattern = re.findall(r"[-路径路径Path path:]+[:：]\s*([^\s\n]+)", content)
+        # 检查路径是否有效：只检查本地 macOS 路径（/Users/ 或 ~/）
+        # 跳过远程服务器路径（/nas/、/tmp/、/home/、/data0/ 等），它们在本机不存在是正常的
+        path_pattern = re.findall(r"(?:路径|Path|path)[:：]\s*([^\s\n]+)", content)
         for path_str in path_pattern:
-            # 跳过 URL（http/https 协议或协议相对 URL）
+            # 跳过 URL
             if path_str.startswith(('http://', 'https://', '//')):
                 continue
-            if path_str.startswith("/") or path_str.startswith("~"):
+            # 只检查本地 macOS 路径
+            is_local = path_str.startswith("/Users/") or path_str.startswith("~/")
+            if is_local:
                 p = Path(path_str).expanduser()
                 if not p.exists():
                     findings.append(AuditFinding(
@@ -378,7 +395,7 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
                     ))
 
         # 检查日期分节（查找过旧的更新）
-        date_sections = re.findall(r"## (\d{4}-\d{2}-\d{2})", content)
+        date_sections = re.findall(r"^##\s+.*?(\d{4}-\d{2}-\d{2})", content, re.MULTILINE)
         if date_sections:
             from datetime import date
             today = date.today()
