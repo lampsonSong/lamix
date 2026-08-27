@@ -326,6 +326,61 @@ def _is_watchdog_running() -> bool:
     return False
 
 
+_INSTANCE_LOCK_PATH = LAMIX_DIR / "instance.lock"
+
+
+def _release_instance_lock() -> None:
+    """释放单实例锁（仅当锁文件属于当前进程时）。"""
+    try:
+        if (
+            _INSTANCE_LOCK_PATH.exists()
+            and _INSTANCE_LOCK_PATH.read_text().strip() == str(os.getpid())
+        ):
+            _INSTANCE_LOCK_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _acquire_instance_lock() -> bool:
+    """单实例锁：防止多个实例同时连接飞书/写入共享状态。
+
+    锁文件写入当前 pid；若锁文件存在但对应进程已死（崩溃残留），
+    自动接管；正常退出时通过 atexit 释放。
+    """
+    import atexit
+
+    try:
+        LAMIX_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return True  # 无法创建目录时不阻断启动
+
+    for _ in range(2):
+        try:
+            fd = os.open(
+                _INSTANCE_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            )
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            atexit.register(_release_instance_lock)
+            return True
+        except FileExistsError:
+            try:
+                pid = int(_INSTANCE_LOCK_PATH.read_text().strip())
+            except (ValueError, OSError):
+                pid = -1
+            # 锁持有者还活着（且不是自己）→ 拒绝启动
+            if pid > 0 and pid != os.getpid() and _process_exists(pid):
+                return False
+            # 陈旧锁（进程已崩溃/被杀）：删除后重试
+            try:
+                _INSTANCE_LOCK_PATH.unlink()
+            except OSError:
+                return False
+    return False
+
+
 def _daemon_start_cmd() -> list[str]:
     """构造 daemon 启动命令。"""
     import importlib.util, shutil
@@ -637,9 +692,17 @@ def _init_platform(config: dict) -> None:
     from src.platforms.manager import PlatformManager
     from src.platforms.adapters.feishu import FeishuAdapter
 
-    # 如果已有实例，跳过
+    # 如果已有实例，跳过（同进程内重复调用）
     if PlatformManager._instance is not None:
         return
+
+    # 单实例保护：已有其它活实例在运行则拒绝启动，避免飞书重复回复/数据竞争
+    if not _acquire_instance_lock():
+        print_error(
+            "检测到另一个 Lamix 实例正在运行（单实例模式），本次启动已取消。\n"
+            "如需重启，请先停止已有实例（lamix gateway stop）。"
+        )
+        sys.exit(0)
 
     # 创建并设置 PlatformManager 单例
     pm = PlatformManager(config)
