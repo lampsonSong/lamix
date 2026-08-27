@@ -11,3 +11,5 @@ build/
 .coverage
 boot_tasks.json
 .cursorrules
+# PyInstaller 自动生成的 spec（由 build_exe.py 命令行参数产生）
+*.spec
