@@ -259,12 +259,8 @@ def _run_repl(config: dict) -> None:
         print_success("再见！")
 
 
-def _process_exists(pid: int) -> bool:
-    """跨平台检查 PID 是否存活。
-    
-    Windows 上用 tasklist（os.kill(pid, 0) 在该平台不可靠，
-    进程已死仍可能返回 True），其他平台用 os.kill(pid, 0)。
-    """
+def _process_name(pid: int) -> str | None:
+    """返回 PID 对应的进程名，不存在返回 None（Windows 用 tasklist）."""
     if sys.platform == "win32":
         import subprocess
         try:
@@ -272,9 +268,34 @@ def _process_exists(pid: int) -> bool:
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5,
             )
-            return str(pid) in result.stdout
+            # CSV: "lamix.exe","1234","Console",...
+            line = result.stdout.strip()
+            if not line or str(pid) not in line:
+                return None
+            return line.split('","')[0].strip('"').lower()
         except (subprocess.SubprocessError, OSError):
-            return False
+            return None
+    else:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                capture_output=True, text=True, timeout=5,
+            )
+            name = result.stdout.strip()
+            return name.lower() if name else None
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+
+def _process_exists(pid: int) -> bool:
+    """跨平台检查 PID 是否存活。
+
+    Windows 上用 tasklist（os.kill(pid, 0) 在该平台不可靠，
+    进程已死仍可能返回 True），其他平台用 os.kill(pid, 0)。
+    """
+    if sys.platform == "win32":
+        return _process_name(pid) is not None
     else:
         try:
             os.kill(pid, 0)
@@ -283,14 +304,26 @@ def _process_exists(pid: int) -> bool:
             return False
 
 
+def _pid_is_lamix(pid: int) -> bool:
+    """检查 PID 是否是 Lamix 自己的进程（防 PID 复用误判）。
+
+    陈旧 daemon.pid 里的 PID 可能被系统无关进程复用（如 fontdrvhost），
+    只看 PID 存活会误判“已在运行”。
+    """
+    name = _process_name(pid)
+    if name is None:
+        return False
+    return "lamix" in name or "python" in name or "py" in name
+
+
 def _is_daemon_running() -> bool:
-    """检查 daemon 是否在运行。"""
+    """检查 daemon 是否在运行（PID 存活且进程名匹配 Lamix）。"""
     pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
     if not pid_path.exists():
         return False
     try:
         pid = int(pid_path.read_text().strip())
-        return _process_exists(pid)
+        return _pid_is_lamix(pid)
     except ValueError:
         return False
 
@@ -905,6 +938,12 @@ def main() -> None:
                     sys.exit(0)
                 if not is_config_complete(config):
                     sys.exit(1)
+            # 打包版：REPL 进程本身就是 daemon（自持飞书连接），
+            # 自注册 daemon.pid，避免依赖外部 daemon 导致误判退出
+            log_dir = Path.home() / ".lamix" / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "daemon.pid").write_text(str(os.getpid()))
+
             _init_platform(config)
             if not _is_daemon_running() and not _is_watchdog_running():
                 print_error("daemon 未运行，请先执行: lamix gateway start")
