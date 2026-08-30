@@ -19,6 +19,9 @@ from src.core.config import LAMIX_DIR
 # Windows 进程创建标志
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+# 无窗口控制台：daemon 及其子进程（如心跳 multiprocessing 子进程）都继承这个不可见控制台，
+# 否则 console-less 的 daemon 再 spawn python.exe 子进程时会弹出可见的黑框。
+CREATE_NO_WINDOW = 0x08000000
 
 
 class WindowsProcessManager(ProcessManager):
@@ -135,7 +138,7 @@ class WindowsProcessManager(ProcessManager):
                     daemon_command,
                     stdout=out_f,
                     stderr=err_f,
-                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
                     cwd=work_dir,
                 )
 
