@@ -27,7 +27,10 @@ class FeishuClient:
         self.app_secret = app_secret
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
-        self._http = httpx.Client(timeout=15.0)
+        # trust_env=False: 不读取 HTTP_PROXY/HTTPS_PROXY 环境变量。
+        # Windows 系统代理设置（127.0.0.1:7897）若未启动服务会让 httpx 卡死，
+        # 飞书直连即可，禁用代理读取避免阻塞。
+        self._http = httpx.Client(timeout=15.0, trust_env=False)
 
     def _get_token(self) -> str:
         """获取 tenant_access_token，过期自动刷新。"""
