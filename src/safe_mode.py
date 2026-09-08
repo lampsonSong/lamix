@@ -38,21 +38,31 @@ CRITICAL_DIRS = ["memory"]
 
 
 def _resolve_daemon_cmd() -> list[str]:
-    """解析 daemon 启动命令，优先使用 lamix 命令。"""
+    """解析 daemon 启动命令。
+
+    frozen 环境：走内部子命令 ``lamix gateway daemon-run``（不能用 ``-m``）。
+    源码环境：优先走 sysconfig 里的 lamix 脚本 + ``gateway daemon-run``，
+    找不到则回退 ``python -m src.daemon``。
+    """
+    from src.core.process_launch import daemon_launch_cmd, is_frozen
+
+    if is_frozen():
+        return daemon_launch_cmd()
+
     import shutil
     import sysconfig
 
     lamix = shutil.which("lamix")
     if lamix:
-        return [lamix, "gateway"]
+        return [lamix, "gateway", "daemon-run"]
 
     scripts = sysconfig.get_path("scripts")
     for name in ["lamix", "lamix.exe", "lamix.bat", "lamix-script.py"]:
         path = os.path.join(scripts, name)
         if os.path.exists(path):
-            return [path, "gateway"]
+            return [path, "gateway", "daemon-run"]
 
-    return [sys.executable, "-m", "src.daemon"]
+    return daemon_launch_cmd()
 
 # ─── 配置读取 ────────────────────────────────────────────────────────────────
 

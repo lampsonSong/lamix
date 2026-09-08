@@ -29,6 +29,13 @@ from pathlib import Path
 
 from src.core.config import load_config, is_config_complete, LAMIX_DIR
 from src.core.heartbeat import HeartbeatManager
+from src.core.process_launch import (
+    ROLE_DAEMON,
+    pid_role,
+    process_exists as _proc_exists,
+    read_pid_record,
+    write_pid_record,
+)
 from src.core.session_manager import get_session_manager
 from src.core.self_audit import (
     run_audit,
@@ -181,48 +188,52 @@ def _check_single_instance() -> None:
     """检查是否已有 daemon 实例在运行，若有则退出。
 
     两层检测：
-    1. PID 文件 → 快速路径，检查文件中记录的进程是否存活
-    2. 进程名扫描 → 扫描所有名为 "lamix" 的进程，杀掉孤儿后继续
+    1. PID 文件 → 快速路径，读取记录的 PID 并校验其身份确为 daemon
+       （防止 daemon.pid 里是 cli 或被复用的 PID 导致误判为“已在运行”）
+    2. 进程名扫描 → 扫描所有真正的 daemon 进程（comm=lamix 且命令行含 daemon 标识），
+       杀掉孤儿后继续。仅杀 daemon，不误伤 cli/watchdog。
 
     确保任何时刻只有一个 lamix daemon 在运行。
     """
     my_pid = os.getpid()
 
-    # ── 第一层：PID 文件检查 ──
+    # ── 第一层：PID 文件检查（带身份校验，兼容老纯 PID 格式）──
     if _DAEMON_PID_PATH.exists():
-        try:
-            old_pid = int(_DAEMON_PID_PATH.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
+        old_pid, _old_role = read_pid_record(_DAEMON_PID_PATH)
+        if old_pid is None:
             _DAEMON_PID_PATH.unlink(missing_ok=True)
-        else:
-            if old_pid != my_pid:
-                from src.platforms.process_manager import get_process_manager
-                pm = get_process_manager()
-                if pm.is_alive(old_pid):
-                    logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
-                    sys.exit(0)
-                else:
-                    logger.info(f"[daemon] 旧进程 {old_pid} 已死，清理 PID 文件")
-                    _DAEMON_PID_PATH.unlink(missing_ok=True)
+        elif old_pid != my_pid:
+            if _proc_exists(old_pid) and pid_role(old_pid) == ROLE_DAEMON:
+                logger.error(f"[daemon] 已有 daemon 实例在运行 (PID={old_pid})，退出")
+                sys.exit(0)
+            else:
+                # 进程已死 or PID 被复用为非 daemon 身份 → 清理
+                logger.info(
+                    f"[daemon] pid 文件中的 {old_pid} 不是活着的 daemon（可能已死或身份不匹配），清理"
+                )
+                _DAEMON_PID_PATH.unlink(missing_ok=True)
 
-    # ── 第二层：按进程名扫描所有 "lamix" 进程 ──
-    # 场景：PID 文件指向已死进程，但有其他 lamix 进程（孤儿/残留）还在跑
+    # ── 第二层：按进程名扫描所有 daemon 进程 ──
     _kill_other_lamix_processes(my_pid)
 
 
 def _kill_other_lamix_processes(my_pid: int) -> None:
-    """扫描并杀掉所有非本进程的 "lamix" daemon 进程。
+    """扫描并杀掉所有非本进程的、且确认身份为 daemon 的残留 lamix 进程。
 
-    通过 pgrep 查找进程名精确匹配 "lamix" 的进程（setproctitle 设置的名称）。
-    杀掉后等待最多 3 秒确认退出。
+    先通过 pgrep 找到所有 comm==lamix 的进程，再用 pid_role() 过滤
+    出真的是 daemon 的，才杀。cli/watchdog 不误伤。
     """
     import signal as sig_module
 
-    other_pids = _find_lamix_pids(exclude_pid=my_pid)
+    candidate_pids = _find_lamix_pids(exclude_pid=my_pid)
+    if not candidate_pids:
+        return
+
+    other_pids = [p for p in candidate_pids if pid_role(p) == ROLE_DAEMON]
     if not other_pids:
         return
 
-    logger.warning(f"[daemon] 发现残留 lamix 进程: {other_pids}，正在清理")
+    logger.warning(f"[daemon] 发现残留 daemon 进程: {other_pids}，正在清理")
 
     # SIGTERM 优雅终止
     for pid in other_pids:
@@ -302,9 +313,12 @@ def _pid_exists(pid: int) -> bool:
 
 
 def _write_daemon_pid() -> None:
-    """写 daemon pid 到文件，供 watchdog 查找。"""
+    """写 daemon pid（含 role 字段）到文件，供 watchdog / gateway 查找。
+
+    使用 JSON 格式，读端通过 role 校验身份，避免把复用的 cli PID 误认为 daemon。
+    """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _DAEMON_PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    write_pid_record(_DAEMON_PID_PATH, os.getpid(), ROLE_DAEMON)
 
 
 def _send_boot_notification(config: dict, pid: int, is_recovery: bool = False) -> None:
@@ -1052,11 +1066,14 @@ def _reload_config(pm, mgr, old_config: dict, new_config: dict) -> None:
 def _reload_llm_clients(mgr, config: dict) -> None:
     """重建所有 session 的 LLM 客户端（主模型 + fallback）。"""
     from src.core.session import _create_llm, _create_llm_from_model_config
-    from src.core.compaction import _build_compaction_config
+    from src.core.compaction import _build_compaction_config, resolve_context_window
 
     primary_llm, primary_adapter = _create_llm(config, channel="cli")
     primary_name = config["llm"]["model"]
-    primary_cw = config["llm"].get("context_window")
+    primary_cw = resolve_context_window(
+        config["llm"]["model"],
+        explicit=config["llm"].get("context_window"),
+    )
 
     # 构建多模型客户端字典
     llm_clients: dict[str, Any] = {
@@ -1081,7 +1098,9 @@ def _reload_llm_clients(mgr, config: dict) -> None:
             llm_clients[name] = {
                 "llm": llm_i,
                 "adapter": adapter_i,
-                "context_window": model_cfg.get("context_window"),
+                "context_window": resolve_context_window(
+                    name, explicit=model_cfg.get("context_window")
+                ),
             }
 
     # 构建 fallback_models

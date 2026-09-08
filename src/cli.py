@@ -34,6 +34,19 @@ from src.core.config import (
     LAMIX_DIR,
 )
 from src.core.session_manager import get_session_manager
+from src.core.process_launch import (
+    ROLE_CLI,
+    ROLE_DAEMON,
+    ROLE_WATCHDOG,
+    daemon_launch_cmd,
+    is_frozen,
+    is_running_as,
+    pid_role,
+    process_exists as _proc_exists,
+    read_pid_record,
+    watchdog_launch_cmd,
+    write_pid_record,
+)
 from src.memory import session_store
 
 # 导入 CLI 样式和补全模块
@@ -317,29 +330,27 @@ def _pid_is_lamix(pid: int) -> bool:
 
 
 def _is_daemon_running() -> bool:
-    """检查 daemon 是否在运行（PID 存活且进程名匹配 Lamix）。"""
+    """检查 daemon 是否在运行。
+
+    仅 PID 存活不够：daemon.pid 里可能是被复用的 PID（如 cli），
+    必须校验对应进程身份确实是 daemon。老格式 pid 文件（纯 PID，无 role）
+    也走同样的 role 校验，避免误判。
+    """
     pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
-    if not pid_path.exists():
+    pid, _role = read_pid_record(pid_path)
+    if pid is None:
         return False
-    try:
-        pid = int(pid_path.read_text().strip())
-        return _pid_is_lamix(pid)
-    except ValueError:
-        return False
+    return is_running_as(pid, ROLE_DAEMON)
 
 
 def _is_watchdog_running() -> bool:
-    """检查 watchdog 是否在运行。"""
-    # 先看 pid 文件
+    """检查 watchdog 是否在运行（身份校验：ps 命令行含 watchdog 标识）。"""
     pid_path = Path.home() / ".lamix" / "logs" / "watchdog.pid"
-    if pid_path.exists():
-        try:
-            pid = int(pid_path.read_text().strip())
-            if _process_exists(pid):
-                return True
-        except ValueError:
-            pass
-    # 兜底：看进程名
+    pid, _role = read_pid_record(pid_path)
+    if pid is not None and is_running_as(pid, ROLE_WATCHDOG):
+        return True
+
+    # 兜底：扫描进程名，防止 pid 文件缺失但 watchdog 还在跑
     import subprocess
 
     if sys.platform == "win32":
@@ -354,7 +365,9 @@ def _is_watchdog_running() -> bool:
             ["ps", "aux"], capture_output=True, text=True
         )
         for line in result.stdout.splitlines():
-            if "src.watchdog" in line and "grep" not in line:
+            if "grep" in line:
+                continue
+            if "src.watchdog" in line or "watchdog-run" in line:
                 return True
     return False
 
@@ -365,20 +378,23 @@ _INSTANCE_LOCK_PATH = LAMIX_DIR / "instance.lock"
 def _release_instance_lock() -> None:
     """释放单实例锁（仅当锁文件属于当前进程时）。"""
     try:
-        if (
-            _INSTANCE_LOCK_PATH.exists()
-            and _INSTANCE_LOCK_PATH.read_text().strip() == str(os.getpid())
-        ):
+        if not _INSTANCE_LOCK_PATH.exists():
+            return
+        pid, _role = read_pid_record(_INSTANCE_LOCK_PATH)
+        if pid == os.getpid():
             _INSTANCE_LOCK_PATH.unlink()
     except OSError:
         pass
 
 
-def _acquire_instance_lock() -> bool:
-    """单实例锁：防止多个实例同时连接飞书/写入共享状态。
+def _acquire_instance_lock(role: str = ROLE_CLI) -> bool:
+    """单实例锁：防止相同角色的多个实例并发。
 
-    锁文件写入当前 pid；若锁文件存在但对应进程已死（崩溃残留），
-    自动接管；正常退出时通过 atexit 释放。
+    - 锁文件为 JSON：{"pid": ..., "role": "cli|daemon|..."}
+    - 若已有锁 role == 本次 role 且持有者仍存活 → 拒绝
+    - 若已有锁 role != 本次 role（如 cli 锁不阻塞 daemon）→ 覆写
+    - 老格式（纯整数）视为未知角色：只有当持有者确实是本次同 role 的进程时才拒绝
+    - 陈旧锁（PID 已死或身份不匹配）→ 覆写
     """
     import atexit
 
@@ -387,52 +403,59 @@ def _acquire_instance_lock() -> bool:
     except OSError:
         return True  # 无法创建目录时不阻断启动
 
-    for _ in range(2):
+    def _take() -> bool:
         try:
-            fd = os.open(
-                _INSTANCE_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY
-            )
-            try:
-                os.write(fd, str(os.getpid()).encode())
-            finally:
-                os.close(fd)
+            write_pid_record(_INSTANCE_LOCK_PATH, os.getpid(), role)
             atexit.register(_release_instance_lock)
             return True
-        except FileExistsError:
-            try:
-                pid = int(_INSTANCE_LOCK_PATH.read_text().strip())
-            except (ValueError, OSError):
-                pid = -1
-            # 锁持有者还活着（且不是自己）→ 拒绝启动
-            if pid > 0 and pid != os.getpid() and _process_exists(pid):
-                return False
-            # 陈旧锁（进程已崩溃/被杀）：删除后重试
-            try:
-                _INSTANCE_LOCK_PATH.unlink()
-            except OSError:
-                return False
+        except OSError:
+            return False
+
+    if not _INSTANCE_LOCK_PATH.exists():
+        return _take()
+
+    existing_pid, existing_role = read_pid_record(_INSTANCE_LOCK_PATH)
+
+    # 同进程重复调用：视为成功
+    if existing_pid == os.getpid():
+        return True
+
+    if existing_pid is None or not _proc_exists(existing_pid):
+        # 陈旧锁：覆写
+        return _take()
+
+    if existing_role and existing_role != role:
+        # 不同角色（如 cli 持锁 vs. 本次 daemon）→ 覆写。
+        # daemon/cli 的单实例语义相互独立。
+        return _take()
+
+    # 老格式或同 role：进一步校验持有者身份是否真的是本次 role
+    actual = pid_role(existing_pid)
+    if actual is None:
+        # 无法辨识（可能被裁剪的 comm）：为安全起见，遵循原逻辑保守拒绝
+        return False
+    if actual != role:
+        # 老格式 pid 文件里 role 未知，但实际身份不同 → 覆写
+        return _take()
+
     return False
 
 
 def _daemon_start_cmd() -> list[str]:
-    """构造 daemon 启动命令。"""
-    import importlib.util, shutil
+    """构造 daemon 启动命令。frozen 走 gateway daemon-run 内部子命令，
+    源码走 python -m src.daemon。Windows 源码环境优先用 pythonw 避免弹窗。
+    """
+    if is_frozen():
+        return daemon_launch_cmd()
 
-    _is_frozen = getattr(sys, "frozen", False)
-    python_exe = sys.executable
-
-    if _is_frozen:
-        return [python_exe, "gateway"]
-    elif sys.platform == "win32":
+    if sys.platform == "win32":
+        python_exe = sys.executable
         pythonw = python_exe.replace("python.exe", "pythonw.exe")
         if Path(pythonw).exists():
             python_exe = pythonw
         return [python_exe, "-m", "src.daemon"]
-    else:
-        lamix_path = shutil.which("lamix")
-        if lamix_path:
-            return [lamix_path, "gateway"]
-        return [python_exe, "-m", "src.daemon"]
+
+    return daemon_launch_cmd()
 
 
 def _start_watchdog() -> None:
@@ -444,8 +467,10 @@ def _start_watchdog() -> None:
     watchdog_log = log_dir / "watchdog.log"
     watchdog_err = log_dir / "watchdog.err.log"
 
+    # frozen: [lamix, gateway, watchdog-run] — 源码: [python, -m, src.watchdog]
+    cmd = watchdog_launch_cmd()
     subprocess.Popen(
-        [sys.executable, "-m", "src.watchdog"],
+        cmd,
         cwd=str(Path(__file__).resolve().parent.parent),
         stdout=open(watchdog_log, "a", encoding="utf-8"),
         stderr=open(watchdog_err, "a", encoding="utf-8"),
@@ -456,20 +481,16 @@ def _start_watchdog() -> None:
 
 
 def _wait_daemon_ready(timeout: int = 15) -> bool:
-    """等待 daemon 心跳文件出现。"""
+    """等待 daemon 心跳文件出现并校验身份是 daemon。"""
     import time
 
     log_dir = Path.home() / ".lamix" / "logs"
     daemon_pid_path = log_dir / "daemon.pid"
     for _ in range(timeout):
         time.sleep(1)
-        if daemon_pid_path.exists():
-            try:
-                pid = int(daemon_pid_path.read_text().strip())
-                if _process_exists(pid):
-                    return True
-            except ValueError:
-                pass
+        pid, _role = read_pid_record(daemon_pid_path)
+        if pid and is_running_as(pid, ROLE_DAEMON):
+            return True
     return False
 
 
@@ -517,23 +538,21 @@ def gateway_stop() -> None:
     log_dir = Path.home() / ".lamix" / "logs"
 
     # 停止 daemon
-    daemon_pid_path = log_dir / "daemon.pid"
-    if daemon_pid_path.exists():
+    daemon_pid, _ = read_pid_record(log_dir / "daemon.pid")
+    if daemon_pid:
         try:
-            pid = int(daemon_pid_path.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-            print_info(f"daemon (PID={pid}) 正在停止...")
-        except (ProcessLookupError, OSError, ValueError):
+            os.kill(daemon_pid, signal.SIGTERM)
+            print_info(f"daemon (PID={daemon_pid}) 正在停止...")
+        except (ProcessLookupError, OSError):
             pass
 
     # 停止 watchdog
-    watchdog_pid_path = log_dir / "watchdog.pid"
-    if watchdog_pid_path.exists():
+    watchdog_pid, _ = read_pid_record(log_dir / "watchdog.pid")
+    if watchdog_pid:
         try:
-            pid = int(watchdog_pid_path.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-            print_info(f"watchdog (PID={pid}) 正在停止...")
-        except (ProcessLookupError, OSError, ValueError):
+            os.kill(watchdog_pid, signal.SIGTERM)
+            print_info(f"watchdog (PID={watchdog_pid}) 正在停止...")
+        except (ProcessLookupError, OSError):
             pass
 
     # 等一下让进程自己退出，再强杀
@@ -608,13 +627,12 @@ def _ensure_watchdog_on_windows() -> None:
             pass
 
     # 启动 watchdog
-    python_exe = sys.executable
     log_dir = Path.home() / ".lamix" / "logs"
     watchdog_log = log_dir / "watchdog.log"
 
     try:
         subprocess.Popen(
-            [python_exe, "-m", "src.watchdog"],
+            watchdog_launch_cmd(),
             stdout=open(watchdog_log, "a"),
             stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW,
@@ -826,11 +844,11 @@ def run_update(args: argparse.Namespace) -> None:
     # 重启 daemon
     print_info("正在重启 daemon...")
     pid_path = Path.home() / ".lamix" / "logs" / "daemon.pid"
-    if pid_path.exists():
+    pid, _ = read_pid_record(pid_path)
+    if pid:
         try:
-            pid = int(pid_path.read_text().strip())
             os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, ValueError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError):
             pass
 
     print_success("更新完成，请重新运行 lamix。")
@@ -907,6 +925,16 @@ def _build_parser() -> argparse.ArgumentParser:
     start_parser = gateway_sub.add_parser("start", help="启动 watchdog + daemon")
     stop_parser = gateway_sub.add_parser("stop", help="停止 daemon + watchdog")
     restart_parser = gateway_sub.add_parser("restart", help="重启 daemon + watchdog")
+    # 内部子命令：frozen 环境下 watchdog/self 拉起 daemon 时使用
+    # （源码环境走 python -m src.daemon / src.watchdog，无需这里）
+    daemon_run_parser = gateway_sub.add_parser(
+        "daemon-run",
+        help="[内部] 前台运行 daemon（供 frozen 环境 subprocess 使用）",
+    )
+    watchdog_run_parser = gateway_sub.add_parser(
+        "watchdog-run",
+        help="[内部] 前台运行 watchdog（供 frozen 环境 subprocess 使用）",
+    )
 
     # lamix model
     model_parser = subparsers.add_parser("model", help="重新配置 LLM 模型")
@@ -942,13 +970,25 @@ def main() -> None:
             # 自注册 daemon.pid，避免依赖外部 daemon 导致误判退出
             log_dir = Path.home() / ".lamix" / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
-            (log_dir / "daemon.pid").write_text(str(os.getpid()))
+            write_pid_record(log_dir / "daemon.pid", os.getpid(), ROLE_DAEMON)
 
             _init_platform(config)
             if not _is_daemon_running() and not _is_watchdog_running():
                 print_error("daemon 未运行，请先执行: lamix gateway start")
                 sys.exit(1)
             _run_repl(config)
+        elif _is_frozen and sys.platform == "darwin":
+            # macOS Lamix.app 双击：弹 Terminal 直接进入对话模式
+            # 命令串：gateway start（确保 daemon，已跑则秒过；未配置则先走向导）
+            #         -> cli（对话 REPL）-> exit
+            # 关闭 Terminal 只结束 REPL，daemon/watchdog 独立存活（飞书不受影响）
+            import subprocess as _sp
+            self_path = sys.executable
+            _cmd = self_path + ' gateway start; ' + self_path + ' cli; exit'
+            _sp.run([
+                "osascript", "-e",
+                'tell application "Terminal" to do script "' + _cmd + '"',
+            ], check=False)
         else:
             # macOS/Linux 开发环境：显示帮助
             parser.print_help()
@@ -965,6 +1005,14 @@ def main() -> None:
             gateway_stop()
         elif action == "restart":
             gateway_restart()
+        elif action == "daemon-run":
+            # frozen 环境下 watchdog/CLI 通过此内部子命令拉起 daemon 前台运行
+            from src.daemon import main as _daemon_main
+            _daemon_main()
+        elif action == "watchdog-run":
+            # frozen 环境下 CLI 通过此内部子命令拉起 watchdog 前台运行
+            from src.watchdog import main as _watchdog_main
+            _watchdog_main()
         else:
             # 无子命令：显示 gateway 子命令帮助
             print("用法: lamix gateway <子命令>")

@@ -31,6 +31,12 @@ from src.core.heartbeat import (
     cleanup_stale_heartbeats,
     load_heartbeat,
 )
+from src.core.process_launch import (
+    ROLE_WATCHDOG,
+    daemon_launch_cmd,
+    read_pid_record,
+    write_pid_record,
+)
 from src.platforms.process_manager import get_process_manager
 import logging
 logger = logging.getLogger(__name__)
@@ -113,24 +119,14 @@ def _restart_daemon(pm) -> None:
 
     # 先找到当前 daemon pid，设置重启标志
     pid_file = LOG_DIR / "daemon.pid"
-    old_pid = None
-    if pid_file.exists():
-        try:
-            old_pid = int(pid_file.read_text().strip())
-        except (ValueError, OSError):
-            pass
+    old_pid, _ = read_pid_record(pid_file)
 
     # 设置重启标志（包含旧 pid，便于日志追踪）
     _set_restart_flag(old_pid or 0)
 
     try:
-        # 优先使用 lamix 命令，确保 ps aux | grep lamix 能搜到
-        lamix_bin = _get_lamix_bin()
-        # 用 python -m src.daemon 启动，避免走 lamix gateway 的 REPL 流程
-        if lamix_bin:
-            daemon_command = [sys.executable, "-m", "src.daemon"]
-        else:
-            daemon_command = [sys.executable, "-m", "src.daemon"]
+        # frozen: [lamix, gateway, daemon-run]；源码: [python, -m, src.daemon]
+        daemon_command = daemon_launch_cmd()
 
         success = pm.restart_daemon(
             daemon_command=daemon_command,
@@ -166,18 +162,14 @@ class Watchdog:
 
     def _find_daemon_pid(self) -> int | None:
         """从进程列表中找到 daemon 的 pid。"""
-        # 优先从 pid 文件读
+        # 优先从 pid 文件读（新版 JSON 或老版纯 PID 都能解析）
         pid_file = LOG_DIR / "daemon.pid"
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                if self._pm.is_alive(pid):
-                    return pid
-            except (ValueError, OSError):
-                pass
+        pid, _ = read_pid_record(pid_file)
+        if pid and self._pm.is_alive(pid):
+            return pid
 
-        # 通过进程名找
-        return self._pm.find_process("(src\\.daemon|lamix.*gateway)")
+        # 通过进程名找（源码/frozen 两种启动方式都覆盖）
+        return self._pm.find_process("(src\\.daemon|daemon-run|lamix.*gateway)")
 
     def _check_daemon(self) -> None:
         """检查 daemon 心跳。"""
@@ -254,6 +246,12 @@ class Watchdog:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
+        # 写入 watchdog.pid（带 role 字段）供 cli 端 _is_watchdog_running() 校验
+        try:
+            write_pid_record(LOG_DIR / "watchdog.pid", os.getpid(), ROLE_WATCHDOG)
+        except OSError:
+            pass
+
         _log(f"Watchdog 启动 (PID={os.getpid()})")
         cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
         cleanup_thread.start()
@@ -280,12 +278,24 @@ class Watchdog:
             except Exception as e:
                 _log(f"检查 daemon 时异常: {e}")
 
+        # 清理自己的 pid 文件，避免残留导致 _is_watchdog_running() 误判
+        try:
+            pid_file = LOG_DIR / "watchdog.pid"
+            existing, _ = read_pid_record(pid_file)
+            if existing == os.getpid():
+                pid_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
         _log("Watchdog 退出")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Lamix Watchdog")
-    parser.parse_args()
+    # 使用 parse_known_args()：frozen 环境下经由
+    # `lamix gateway watchdog-run` 进入时，sys.argv 里已有外层 CLI 的位置参数，
+    # 直接 parse_args() 会把它们当成非法参数而报错。
+    parser.parse_known_args()
     Watchdog().run()
 
 
