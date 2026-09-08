@@ -935,6 +935,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "watchdog-run",
         help="[内部] 前台运行 watchdog（供 frozen 环境 subprocess 使用）",
     )
+    safe_mode_run_parser = gateway_sub.add_parser(
+        "safe-mode-run",
+        help="[内部] 前台运行 safe_mode（供 frozen 环境 subprocess 使用）",
+    )
 
     # lamix model
     model_parser = subparsers.add_parser("model", help="重新配置 LLM 模型")
@@ -1013,6 +1017,10 @@ def main() -> None:
             # frozen 环境下 CLI 通过此内部子命令拉起 watchdog 前台运行
             from src.watchdog import main as _watchdog_main
             _watchdog_main()
+        elif action == "safe-mode-run":
+            # frozen 环境下 daemon 通过此内部子命令拉起 safe_mode 前台运行
+            from src.safe_mode import main as _safe_mode_main
+            _safe_mode_main()
         else:
             # 无子命令：显示 gateway 子命令帮助
             print("用法: lamix gateway <子命令>")

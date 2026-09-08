@@ -46,6 +46,22 @@ def watchdog_launch_cmd() -> list[str]:
     return [sys.executable, "-m", "src.watchdog"]
 
 
+def safe_mode_launch_cmd(safe_mode_script: str | None = None) -> list[str]:
+    """返回用于以子进程方式启动 safe_mode 的 argv。
+
+    frozen: ``[lamix, gateway, safe-mode-run]``（走 CLI 内部子命令，
+    不能把 src/safe_mode.py 路径当参数传给 lamix 二进制）。
+    源码: ``[python, src/safe_mode.py]``（脚本路径由调用方传入）。
+    """
+    if is_frozen():
+        return [sys.executable, "gateway", "safe-mode-run"]
+    if safe_mode_script is None:
+        # 源码模式下 safe_mode.py 就在 src/ 目录
+        from pathlib import Path as _P
+        safe_mode_script = str(_P(__file__).resolve().parent.parent / "safe_mode.py")
+    return [sys.executable, safe_mode_script]
+
+
 # ── PID/锁文件的身份校验 ─────────────────────────────────────────────
 
 

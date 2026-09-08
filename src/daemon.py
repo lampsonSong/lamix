@@ -31,9 +31,11 @@ from src.core.config import load_config, is_config_complete, LAMIX_DIR
 from src.core.heartbeat import HeartbeatManager
 from src.core.process_launch import (
     ROLE_DAEMON,
+    is_frozen,
     pid_role,
     process_exists as _proc_exists,
     read_pid_record,
+    safe_mode_launch_cmd,
     write_pid_record,
 )
 from src.core.session_manager import get_session_manager
@@ -1166,12 +1168,14 @@ def _trigger_safe_mode(pm, mgr) -> None:
     except Exception as e:
         logger.error(f"[daemon] 保存会话出错: {e}")
 
-    # 启动 safe_mode.py（独立进程，阻塞等待它结束）
-    if SAFE_MODE_SCRIPT.exists():
-        logger.info(f"[daemon] 启动 safe_mode: {SAFE_MODE_SCRIPT}")
+    # 启动 safe_mode（独立进程，阻塞等待它结束）
+    # frozen: 走 `lamix gateway safe-mode-run`；源码: 直接跑 src/safe_mode.py
+    if is_frozen() or SAFE_MODE_SCRIPT.exists():
+        cmd = safe_mode_launch_cmd(str(SAFE_MODE_SCRIPT))
+        logger.info(f"[daemon] 启动 safe_mode: {' '.join(cmd)}")
         try:
             proc = subprocess.Popen(
-                [sys.executable, str(SAFE_MODE_SCRIPT)],
+                cmd,
                 cwd=str(LAMIX_DIR.parent / "lamix"),
                 stdout=open(LOG_DIR / "safe_mode.log", "a", encoding="utf-8"),
                 stderr=open(LOG_DIR / "safe_mode.err.log", "a", encoding="utf-8"),

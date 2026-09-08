@@ -69,6 +69,29 @@ class TestLaunchCmd:
         assert "-m" not in cmd
         assert "src.watchdog" not in cmd
 
+    def test_safe_mode_cmd_source_mode(self):
+        """源码环境：safe_mode.py 路径作为参数传给 python"""
+        with mock.patch.object(pl, "is_frozen", return_value=False):
+            with mock.patch.object(pl.sys, "executable", "/usr/bin/python"):
+                cmd = pl.safe_mode_launch_cmd("/tmp/safe_mode.py")
+        assert cmd == ["/usr/bin/python", "/tmp/safe_mode.py"]
+
+    def test_safe_mode_cmd_frozen_mode(self):
+        """frozen 环境：不能把 safe_mode.py 路径传给 lamix 二进制，
+        必须走 gateway safe-mode-run 内部子命令。"""
+        with mock.patch.object(pl, "is_frozen", return_value=True):
+            with mock.patch.object(
+                pl.sys, "executable", "/Applications/Lamix.app/Contents/MacOS/lamix"
+            ):
+                cmd = pl.safe_mode_launch_cmd("/anything/ignored.py")
+        assert cmd == [
+            "/Applications/Lamix.app/Contents/MacOS/lamix",
+            "gateway",
+            "safe-mode-run",
+        ]
+        assert "safe_mode.py" not in " ".join(cmd)
+        assert "src.safe_mode" not in cmd
+
     def test_is_frozen_reads_sys_frozen(self):
         """is_frozen() 直接反映 sys.frozen 属性"""
         # 默认（无 sys.frozen）返回 False
@@ -404,6 +427,15 @@ class TestGatewayInternalSubcommands:
         args = parser.parse_args(["gateway", "watchdog-run"])
         assert args.command == "gateway"
         assert args.gateway_action == "watchdog-run"
+
+    def test_safe_mode_run_subcommand_parses(self):
+        """frozen 环境 daemon 会用 lamix gateway safe-mode-run 拉起 safe_mode"""
+        from src import cli
+
+        parser = cli._build_parser()
+        args = parser.parse_args(["gateway", "safe-mode-run"])
+        assert args.command == "gateway"
+        assert args.gateway_action == "safe-mode-run"
 
     def test_existing_gateway_subcommands_still_work(self):
         """回归：start/stop/restart 未被破坏"""
