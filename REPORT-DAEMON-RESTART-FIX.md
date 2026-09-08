@@ -225,3 +225,114 @@ usage: lamix gateway [-h] {start,stop,restart,daemon-run,watchdog-run,safe-mode-
 - 未装到 `/Applications`，产物只在 `dist/Lamix.app`
 
 **建议下一步（不在本次范围）**：用户需要重启当前 launchd 管理的 daemon（`launchctl kickstart -k gui/$(id -u)/com.lamix.gateway` 或重新登录）才能让新逻辑生效于真实链路。届时应观察 `~/.lamix/logs/watchdog.log` 不再出现「心跳文件不存在，尝试重启」的循环。
+
+---
+
+## 第四轮：watchdog 循环重启残留 3 bug（2026-09-08 20:xx）
+
+### 背景
+今晚 20:10 打包版 watchdog 无限循环重启 daemon（每 10 秒一轮，用户被上线通知轰炸，泄漏 14 个进程），已人工止血。前三轮已修好心跳 multiprocessing 坑（心跳已线程化），但现场发现 3 个残留 bug。
+
+### Bug A：restart_daemon 杀旧进程失效 → 进程泄漏
+
+**根因**：第一轮把 pid 文件升级为 JSON 格式（`{"pid": ..., "role": ...}`），但 `PosixProcessManager.restart_daemon()` 和 `find_process()` 仍用 `int(pid_file.read_text().strip())` 解析 → JSON 内容传给 `int()` 必抛 `ValueError` → `old_pid=None` → kill 旧进程被静默跳过 → watchdog 每次"重启"只拉新不杀旧，14 个 lamix 进程堆积。同样问题存在于 `kill_process` 内的 `_cleanup_pid_file()` 和 `WindowsProcessManager.restart_daemon()`。
+
+**修法**：
+- `PosixProcessManager.restart_daemon()` / `find_process()` / `_cleanup_pid_file()` 全部改用 `read_pid_record()` 读取 pid（兼容 JSON 与老纯整数）
+- `WindowsProcessManager.restart_daemon()` 同样改用 `read_pid_record()`
+- 语义不变：杀旧后仍清理 pid 文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/platforms/posix_process_manager.py` | `find_process`、`_cleanup_pid_file`、`restart_daemon` 三处 `int()` → `read_pid_record()` |
+| `src/platforms/windows/process_manager.py` | `restart_daemon` 一处 `int()` → `read_pid_record()` |
+
+### Bug B：watchdog 心跳判定无启动宽限期
+
+**根因**：daemon pid 变化后，若下个 10s 检查周期内心跳文件 `~/.lamix/heartbeat/<pid>.json` 不存在，watchdog 立即判死重启。daemon 完整启动（含飞书 adapter、索引刷新）需要 ~12s，慢环境下仍会死循环。
+
+**修法**：
+- `Watchdog` 实例新增 `_pid_changed_at` 时间戳，pid 变化时记录
+- 同一 pid 启动后 **60 秒内**，心跳文件不存在只记日志（`"daemon (pid) 启动宽限期内，等待心跳..."`），不触发重启
+- 超过 60 秒仍无心跳文件，才判死重启
+- 宽限期只针对"心跳文件不存在"；心跳文件存在但超时的老逻辑不受影响
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/watchdog.py` | 新增 `STARTUP_GRACE_PERIOD=60`、`_pid_changed_at` 字段；`_check_daemon` 中 pid 变化时记录时间戳，心跳文件不存在时检查宽限期 |
+
+### Bug C：上线通知无冷却 → 循环时轰炸用户
+
+**根因**：watchdog 每次重拉 daemon 都调用 `_send_boot_notification()`，3 分钟收到 ~18 条飞书通知。
+
+**修法**：
+- 发送前读 `~/.lamix/logs/last_online_notify.json`（内容 `{"last_sent": "<ISO时间戳>"}`）
+- 距上次成功发送 < 600 秒 → 跳过，log `"上线通知冷却中，跳过（距上次 X 秒）"`
+- 发送成功后写入当前时间戳
+- 文件不存在/损坏/解析失败 → 视为可发送
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/daemon.py` | 新增 `_NOTIFY_COOLDOWN_SECONDS=600`、`_LAST_NOTIFY_PATH`、`_check_notify_cooldown()`、`_record_notify_sent()`；`_send_boot_notification()` 入口调用冷却检查 |
+
+### 测试
+
+新增 `tests/test_round4_fixes.py`（13 个用例），覆盖：
+- Bug A：JSON pid 文件 restart_daemon 能取出正确 pid 并 kill（mock kill_process 断言 pid）；老纯整数格式不回归；pid 文件不存在不调用 kill；JSON 格式 `_cleanup_pid_file` 正确匹配删除；Windows 同理
+- Bug B：pid 刚变化+心跳不存在→不 restart；超 60s+心跳仍不存在→restart；心跳新鲜→不 restart
+- Bug C：首次发送成功写时间戳；600s 内跳过；超 600s 再发；文件损坏→可发；`_send_boot_notification` 冷却期内不实例化 FeishuClient
+
+```
+$ .venv/bin/python -m pytest tests/test_round4_fixes.py -v --tb=short
+tests/test_round4_fixes.py::TestBugA_RestartDaemonPidParsing::test_posix_restart_daemon_json_pid PASSED
+tests/test_round4_fixes.py::TestBugA_RestartDaemonPidParsing::test_posix_restart_daemon_plain_int_pid PASSED
+tests/test_round4_fixes.py::TestBugA_RestartDaemonPidParsing::test_posix_restart_daemon_no_pid_file PASSED
+tests/test_round4_fixes.py::TestBugA_RestartDaemonPidParsing::test_posix_cleanup_pid_file_json_format PASSED
+tests/test_round4_fixes.py::TestBugA_RestartDaemonPidParsing::test_windows_restart_daemon_json_pid PASSED
+tests/test_round4_fixes.py::TestBugB_WatchdogStartupGrace::test_no_restart_during_grace_period PASSED
+tests/test_round4_fixes.py::TestBugB_WatchdogStartupGrace::test_restart_after_grace_period PASSED
+tests/test_round4_fixes.py::TestBugB_WatchdogStartupGrace::test_no_restart_when_heartbeat_fresh PASSED
+tests/test_round4_fixes.py::TestBugC_NotifyCooldown::test_first_send_succeeds_and_records PASSED
+tests/test_round4_fixes.py::TestBugC_NotifyCooldown::test_cooldown_within_600s PASSED
+tests/test_round4_fixes.py::TestBugC_NotifyCooldown::test_no_cooldown_after_600s PASSED
+tests/test_round4_fixes.py::TestBugC_NotifyCooldown::test_corrupted_file_allows_send PASSED
+tests/test_round4_fixes.py::TestBugC_NotifyCooldown::test_send_boot_notification_skips_during_cooldown PASSED
+============================== 13 passed in 0.10s ==============================
+```
+
+### 全量测试
+
+```
+$ .venv/bin/python -m pytest tests/ --tb=short
+================== 679 passed, 2 skipped, 1 warning in 43.04s ==================
+```
+
+**679/681 通过，0 失败，2 skip（既有跳过用例）。**（相比第二轮 666 通过：新增 13 个测试。）
+
+### 打包产物
+
+```
+$ .venv/bin/python scripts/build_app.py
+...
+✓ 构建完成：/Users/songyuhao/lamix/dist/Lamix.app
+    体积：103M
+```
+
+### 改动文件清单
+
+| 文件 | 说明 |
+| --- | --- |
+| `src/platforms/posix_process_manager.py` | Bug A：`find_process`、`_cleanup_pid_file`、`restart_daemon` 改用 `read_pid_record()` |
+| `src/platforms/windows/process_manager.py` | Bug A：`restart_daemon` 改用 `read_pid_record()` |
+| `src/watchdog.py` | Bug B：新增 `STARTUP_GRACE_PERIOD`、`_pid_changed_at`，宽限期逻辑 |
+| `src/daemon.py` | Bug C：新增通知冷却机制（`_check_notify_cooldown` / `_record_notify_sent`） |
+| `tests/test_round4_fixes.py`（新） | 13 个测试用例覆盖 3 个 bug |
+| `REPORT-DAEMON-RESTART-FIX.md` | 追加第四轮修复章节 |
+
+### 遵守纪律
+
+- 未 kill/pkill 任何 lamix 或 claude 相关进程
+- 未做任何 launchctl 操作
+- 未触碰 /Applications/Lamix.app
+- 全量测试 679 passed, 0 failed
+- 打包成功，产物在 dist/Lamix.app

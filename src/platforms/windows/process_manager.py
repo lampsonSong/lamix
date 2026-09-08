@@ -15,6 +15,7 @@ from pathlib import Path
 
 from src.platforms.process_manager import ProcessManager
 from src.core.config import LAMIX_DIR
+from src.core.process_launch import read_pid_record
 
 # Windows 进程创建标志
 DETACHED_PROCESS = 0x00000008
@@ -116,12 +117,9 @@ class WindowsProcessManager(ProcessManager):
         独立于 watchdog 进程组，watchdog 退出不会连带杀 daemon。
         """
         # 终止旧进程
-        if pid_file.exists():
-            try:
-                old_pid = int(pid_file.read_text().strip())
-                self.kill_process(old_pid, graceful=True)
-            except (ValueError, OSError):
-                pass
+        old_pid, _ = read_pid_record(pid_file)
+        if old_pid is not None:
+            self.kill_process(old_pid, graceful=True)
 
         try:
             log_dir.mkdir(parents=True, exist_ok=True)

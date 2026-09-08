@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+from src.core.process_launch import read_pid_record
 from src.platforms.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,9 @@ class PosixProcessManager(ProcessManager):
         from src.core.config import LAMIX_DIR
 
         pid_file = LAMIX_DIR / "logs" / "daemon.pid"
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text(encoding="utf-8").strip())
-                if self.is_alive(pid):
-                    return pid
-            except (ValueError, OSError):
-                pass
+        pid, _ = read_pid_record(pid_file)
+        if pid and self.is_alive(pid):
+            return pid
 
         # 通过 pgrep 查找
         try:
@@ -118,11 +115,10 @@ class PosixProcessManager(ProcessManager):
         def _cleanup_pid_file() -> None:
             """如果 PID 文件记录的是本 pid，则删除。"""
             try:
-                if pid_file.exists():
-                    stored = pid_file.read_text(encoding="utf-8").strip()
-                    if stored == str(pid):
-                        pid_file.unlink(missing_ok=True)
-            except (ValueError, OSError):
+                stored_pid, _ = read_pid_record(pid_file)
+                if stored_pid == pid:
+                    pid_file.unlink(missing_ok=True)
+            except OSError:
                 pass
 
         # 进程不存在（包括僵尸），直接清理
@@ -168,12 +164,7 @@ class PosixProcessManager(ProcessManager):
         所以这里只做清理，让 daemon 自己在 _write_daemon_pid() 中写入真实 PID。
         """
         # 先尝试终止旧进程
-        old_pid = None
-        if pid_file.exists():
-            try:
-                old_pid = int(pid_file.read_text(encoding="utf-8").strip())
-            except (ValueError, OSError):
-                pass
+        old_pid, _ = read_pid_record(pid_file)
 
         if old_pid is not None:
             self.kill_process(old_pid, graceful=True)

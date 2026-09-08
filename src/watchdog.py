@@ -153,12 +153,16 @@ SLEEP_DETECT_MULTIPLIER: int = 3
 class Watchdog:
     """看门狗主逻辑。"""
 
+    # daemon 启动后心跳文件不存在的宽限期（秒）
+    STARTUP_GRACE_PERIOD: int = 60
+
     def __init__(self) -> None:
         self._shutdown = threading.Event()
         self._daemon_pid: int | None = None  # 监控的 daemon pid
         self._pm = get_process_manager()  # 平台相关的进程管理器
         self._last_check_time: float | None = None  # 上次检查的时间戳，用于检测系统睡眠
         self._sleep_grace_until: float = 0  # 睡眠恢复后的宽限期截止时间戳
+        self._pid_changed_at: float | None = None  # pid 变化（新 daemon 上线）的时间戳
 
     def _find_daemon_pid(self) -> int | None:
         """从进程列表中找到 daemon 的 pid。"""
@@ -183,12 +187,19 @@ class Watchdog:
         if pid != self._daemon_pid:
             _log(f"daemon pid 变化: {self._daemon_pid} -> {pid}")
             self._daemon_pid = pid
+            self._pid_changed_at = time.time()
             # 新 daemon 上线时清除重启标志
             _clear_restart_flag()
 
         # 读心跳文件
         heartbeat_path = HEARTBEAT_DIR / f"{pid}.json"
         if not heartbeat_path.exists():
+            # 启动宽限期：pid 刚变化后 STARTUP_GRACE_PERIOD 秒内不因心跳文件不存在而重启
+            if self._pid_changed_at is not None:
+                elapsed_since_start = time.time() - self._pid_changed_at
+                if elapsed_since_start < self.STARTUP_GRACE_PERIOD:
+                    _log(f"daemon ({pid}) 启动宽限期内（{elapsed_since_start:.0f}s < {self.STARTUP_GRACE_PERIOD}s），等待心跳...")
+                    return
             _log(f"daemon ({pid}) 心跳文件不存在，尝试重启")
             _restart_daemon(self._pm)
             return

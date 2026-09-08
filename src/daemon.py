@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 from typing import Any
 from pathlib import Path
 
@@ -323,6 +324,40 @@ def _write_daemon_pid() -> None:
     write_pid_record(_DAEMON_PID_PATH, os.getpid(), ROLE_DAEMON)
 
 
+_NOTIFY_COOLDOWN_SECONDS = 600  # 上线通知冷却时间（秒）
+_LAST_NOTIFY_PATH = LAMIX_DIR / "logs" / "last_online_notify.json"
+
+
+def _check_notify_cooldown() -> bool:
+    """检查上线通知是否在冷却中。返回 True 表示冷却中应跳过。"""
+    try:
+        if not _LAST_NOTIFY_PATH.exists():
+            return False
+        raw = _LAST_NOTIFY_PATH.read_text(encoding="utf-8").strip()
+        data = json.loads(raw)
+        last_sent = datetime.fromisoformat(data["last_sent"])
+        elapsed = (datetime.now() - last_sent).total_seconds()
+        if elapsed < _NOTIFY_COOLDOWN_SECONDS:
+            logger.info(f"[daemon] 上线通知冷却中，跳过（距上次 {elapsed:.0f} 秒）")
+            return True
+        return False
+    except Exception:
+        # 文件不存在/损坏/解析失败 → 视为可发送
+        return False
+
+
+def _record_notify_sent() -> None:
+    """记录上线通知发送时间。"""
+    try:
+        _LAST_NOTIFY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LAST_NOTIFY_PATH.write_text(
+            json.dumps({"last_sent": datetime.now().isoformat()}),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"[daemon] 写入上线通知时间戳失败: {e}")
+
+
 def _send_boot_notification(config: dict, pid: int, is_recovery: bool = False) -> None:
     """常驻上线通知：优先发 open_id 私聊，失败则发 owner_chat_id 群聊。
 
@@ -331,6 +366,10 @@ def _send_boot_notification(config: dict, pid: int, is_recovery: bool = False) -
         pid: 当前 daemon PID
         is_recovery: True 表示被 watchdog 重启恢复，False 表示正常上线
     """
+    # 冷却检查：防止 watchdog 循环重启时轰炸用户
+    if _check_notify_cooldown():
+        return
+
     owner_chat_id = config.get("feishu", {}).get("owner_chat_id", "").strip()
     user_open_id = config.get("feishu", {}).get("user_open_id", "").strip()
     app_id = config.get("feishu", {}).get("app_id", "").strip()
@@ -368,6 +407,7 @@ def _send_boot_notification(config: dict, pid: int, is_recovery: bool = False) -
                         receive_id_type=receive_id_type,
                     )
                     logger.info(f"[daemon] 上线通知已发送 (via {receive_id_type})")
+                    _record_notify_sent()
                     return
                 except Exception as e:
                     if attempt == 0:
