@@ -16,6 +16,8 @@ import uuid
 from io import BytesIO
 from typing import Any, Optional
 
+from PIL import Image
+
 import pyautogui  # 可选：截图和鼠标键盘控制
 
 # pyautogui 安全设置：失败时停止
@@ -27,28 +29,48 @@ pyautogui.PAUSE = 0.05  # 每次操作后暂停 50ms，避免太快
 
 def take_screenshot() -> str:
     """截取全屏，保存为 PNG 文件并返回路径和尺寸信息。"""
-    img = pyautogui.screenshot()
-    w, h = img.size
     save_dir = os.path.expanduser("~/.lamix/screenshots")
     os.makedirs(save_dir, exist_ok=True)
     filename = f"screenshot_{uuid.uuid4().hex[:8]}.png"
     filepath = os.path.join(save_dir, filename)
-    img.save(filepath, format="PNG")
+    # macOS TCC：pyautogui.screenshot() 在后台进程会截到黑屏，
+    # 改用 Apple 自带的 screencapture（签名健全，可正常授权）
+    proc = subprocess.run(
+        ["/usr/sbin/screencapture", "-x", filepath],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"screencapture failed: {proc.stderr.strip()}")
+    img = Image.open(filepath)
+    w, h = img.size
     file_size = os.path.getsize(filepath)
     return f"截图已保存到 {filepath}（{w}x{h}，{file_size // 1024}KB）"
 
 
 def take_screenshot_region(x: int, y: int, width: int, height: int) -> str:
-    """截取屏幕指定区域，保存为 PNG 文件并返回路径和尺寸信息。"""
-    img = pyautogui.screenshot(region=(x, y, width, height))
-    w, h = img.size
+    """截取屏幕指定区域，保存为 PNG 文件并返回路径和尺寸信息。
+
+    注：screencapture 的 -R 参数在部分 macOS 版本上存在 bug
+    （could not create image from display with rect），
+    因此改为全屏截图后用 PIL 裁剪，结果一致且更可靠。
+    """
     save_dir = os.path.expanduser("~/.lamix/screenshots")
     os.makedirs(save_dir, exist_ok=True)
     filename = f"screenshot_region_{uuid.uuid4().hex[:8]}.png"
     filepath = os.path.join(save_dir, filename)
-    img.save(filepath, format="PNG")
+    proc = subprocess.run(
+        ["/usr/sbin/screencapture", "-x", filepath],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"screencapture failed: {proc.stderr.strip()}")
+    with Image.open(filepath) as img:
+        cropped = img.crop((x, y, x + width, y + height))
+    cropped.save(filepath, format="PNG")
+    w, h = cropped.size
     file_size = os.path.getsize(filepath)
     return f"区域截图已保存到 {filepath}（{w}x{h}，{file_size // 1024}KB）"
+
 
 
 # ─── 鼠标操作 ────────────────────────────────────────────────────────────
@@ -161,7 +183,7 @@ def _query_ui_macos(app_name: str, element_role: str = "",
     title_filter = f'name contains "{element_title}" or description contains "{element_title}"' if element_title else 'true'
 
     script = f'''
-tell application "{app_name}"
+tell application "System Events"
     tell process "{app_name}"
         set matchedElements to every UI element whose {role_filter} and {title_filter}
         set resultList to {{}}

@@ -394,23 +394,20 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
                         suggestion="确认路径是否正确，或更新为新路径",
                     ))
 
-        # 检查日期分节（查找过旧的更新）
-        date_sections = re.findall(r"^##\s+.*?(\d{4}-\d{2}-\d{2})", content, re.MULTILINE)
-        if date_sections:
-            from datetime import date
-            today = date.today()
-            try:
-                latest = max(datetime.strptime(d, "%Y-%m-%d").date() for d in date_sections)
-                age_days = (today - latest).days
-                if age_days > 180:
-                    findings.append(AuditFinding(
-                        severity="info",
-                        category="project",
-                        target=name,
-                        message=f"最近一次更新是 {latest}，已 {age_days} 天未更新",
-                    ))
-            except ValueError:
-                pass
+        # 检查文件是否长期未更新（用文件 mtime，不用标题中的历史事件日期）
+        from datetime import date
+        try:
+            file_mtime = datetime.fromtimestamp(project_md.stat().st_mtime).date()
+            age_days = (date.today() - file_mtime).days
+            if age_days > 180:
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="project",
+                    target=name,
+                    message=f"文件已 {age_days} 天未更新（mtime: {file_mtime}）",
+                ))
+        except OSError:
+            pass
 
         # 检查是否有未闭合的代码块
         code_blocks = re.findall(r"```", content)

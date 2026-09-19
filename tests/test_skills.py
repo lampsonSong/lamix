@@ -76,7 +76,7 @@ class TestSkillTool:
         # search 直接使用 _active_skill_index，不需要 mock _resolve_skill_path
         with patch("src.core.skills_tools._active_skill_index", mock_index):
             result = skill({"action": "search", "query": "review"})
-        assert "Code Review" in result or "# Code Review" in result
+        assert "code-review" in result
 
     def test_skill_search_no_match(self):
         """search 无匹配。"""

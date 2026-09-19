@@ -44,6 +44,50 @@ END_THRESHOLD_PERCENT = 80.0
 DEFAULT_CONTEXT_WINDOW = 131_072
 DEFAULT_TRIGGER_THRESHOLD = 0.90
 
+# ── 模型上下文长度注册表（前缀匹配，从短到长排列以避免误匹配） ────────────────
+# 数据来源：各模型官方文档 / OpenRouter
+MODEL_CONTEXT_PREFIXES: list[tuple[str, int]] = [
+    # GLM series (Zhipu / BigModel)
+    ("glm-5",         1_000_000),  # GLM-5 / 5.1 / 5.2: 1M context
+    ("glm-4.7",       200_000),
+    ("glm-4.6",       200_000),
+    ("glm-4.5",       128_000),
+    ("glm-4",         128_000),   # GLM-4 / 4-Plus / 4-Air 等
+    # MiniMax series
+    ("MiniMax-M3",    204_800),
+    ("MiniMax-M2",    204_800),   # M2 / M2.1 / M2.5 / M2.7 及 highspeed 变体
+    # DeepSeek series
+    ("deepseek-v4",   1_000_000),  # DeepSeek V4: 1M context
+    ("deepseek-v3",   128_000),
+    ("deepseek-r1",   128_000),
+    # Anthropic Claude series (via proxy)
+    ("claude-4",      200_000),
+    ("claude-3.7",    200_000),
+    ("claude-3.5",    200_000),
+    # OpenAI series
+    ("gpt-5",         400_000),
+    ("gpt-4.1",       1_000_000),
+    ("gpt-4o",        128_000),
+]
+
+
+def resolve_context_window(model_name: str, explicit: int | None = None) -> int:
+    """根据模型名自动解析上下文窗口大小。
+
+    优先级：explicit（config 中手动设置的）> 注册表前缀匹配 > DEFAULT_CONTEXT_WINDOW。
+    """
+    if explicit:
+        return int(explicit)
+    model_lower = model_name.lower()
+    for prefix, cw in MODEL_CONTEXT_PREFIXES:
+        if model_lower.startswith(prefix.lower()):
+            return cw
+    logger.info(
+        "[compaction] 模型 '%s' 未在注册表中，使用默认 context_window=%d",
+        model_name, DEFAULT_CONTEXT_WINDOW,
+    )
+    return DEFAULT_CONTEXT_WINDOW
+
 
 @dataclass
 class CompactionConfig:

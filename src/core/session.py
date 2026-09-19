@@ -27,7 +27,7 @@ from src.core.config import (
 from src.core.indexer import ProjectIndex, SkillIndex
 from src.core.llm import LLMClient
 from src.core.adapters import BaseModelAdapter, create_adapter
-from src.core.compaction import CompactionConfig
+from src.core.compaction import CompactionConfig, resolve_context_window
 from src.core.agent import Agent
 from src.memory import manager as memory_mgr
 from src.memory import session_store
@@ -324,7 +324,10 @@ class Session:
         # 先加入 config.llm（当前激活模型）
         primary_llm, primary_adapter = _create_llm(config, channel=channel)
         primary_name = config["llm"]["model"]
-        primary_cw = config["llm"].get("context_window")
+        primary_cw = resolve_context_window(
+            config["llm"]["model"],
+            explicit=config["llm"].get("context_window"),
+        )
         llm_clients[primary_name] = {
             "llm": primary_llm,
             "adapter": primary_adapter,
@@ -346,7 +349,9 @@ class Session:
                 llm_clients[name] = {
                     "llm": llm_i,
                     "adapter": adapter_i,
-                    "context_window": model_cfg.get("context_window"),
+                    "context_window": resolve_context_window(
+                        name, explicit=model_cfg.get("context_window")
+                    ),
                 }
 
         # 构建 fallback_models（排除主模型，保留 llm_clients 中的顺序）
@@ -423,7 +428,10 @@ class Session:
         from src.core.self_audit import touch_last_active_date
         touch_last_active_date()
         if user_input.startswith("/"):
-            return self._handle_command(user_input)
+            result = self._handle_command(user_input)
+            if result is not None:
+                return result
+            # 未匹配已知命令，当普通文本处理
 
         # CLI 单线程：直接处理，不需要队列
         if self.channel != "feishu":
@@ -1127,10 +1135,9 @@ class Session:
         if command == "/resume":
             return HandleResult(reply=self._handle_resume(parts), is_command=True)
 
-        return HandleResult(
-            reply=f"未知命令：{command}，输入 /help 查看帮助。",
-            is_command=True,
-        )
+        # 未知命令：返回 None，让调用方当普通文本处理
+        logger.info("[session] 未识别的 / 命令 %r，当普通文本处理", command)
+        return None
 
     def _handle_compaction(self) -> HandleResult:
         """手动触发上下文压缩。"""

@@ -308,21 +308,33 @@ def _run_skill_search(params: dict[str, Any]) -> str:
     if not query:
         return "[错误] query 参数不能为空"
 
-    from src.core.prompt_builder import _scan_skills_dir, _parse_frontmatter
+    from src.core.prompt_builder import _parse_frontmatter
 
-    entries = _scan_skills_dir()
+    # 优先用 _active_skill_index._entries（含 mock 注入场景），fallback 到磁盘扫描
+    entries: list[dict[str, Any]] = []
+    if _active_skill_index and hasattr(_active_skill_index, "_entries"):
+        entries = list(_active_skill_index._entries)
+    if not entries:
+        from src.core.prompt_builder import _scan_skills_dir
+        entries = _scan_skills_dir()
     if not entries:
         return "[提示] 技能索引为空"
 
     q_lower = query.lower()
-    results: list[tuple[float, str]] = []  # (score, content)
+    # (score, name, description, content)
+    results: list[tuple[float, str, str, str]] = []
 
     for e in entries:
-        skill_dir = e["path"].parent
+        raw_path = e.get("path")
+        if raw_path is None:
+            continue
+        skill_path = Path(raw_path) if isinstance(raw_path, str) else raw_path
+        skill_dir = skill_path.parent
         skill_name = str(e.get("name", ""))
+        skill_desc = str(e.get("description", ""))
 
         # 搜索所有相关文件
-        files_to_search: list[Path] = [e["path"]]  # SKILL.md
+        files_to_search: list[Path] = [skill_path]  # SKILL.md
 
         # references/*.md, templates/*.md
         for subdir in ("references", "templates"):
@@ -345,11 +357,13 @@ def _run_skill_search(params: dict[str, Any]) -> str:
             score = 2.0
         elif q_lower in skill_name.lower():
             score = 1.5
+        elif q_lower in skill_desc.lower():
+            score = 1.2
         elif q_lower in all_text.lower():
             score = 1.0
 
         if score > 0:
-            results.append((score, all_text))
+            results.append((score, skill_name, skill_desc, all_text))
 
     results.sort(key=lambda x: -x[0])
     top = results[:top_k]
@@ -357,7 +371,12 @@ def _run_skill_search(params: dict[str, Any]) -> str:
     if not top:
         return f"[提示] 没有找到与「{query}」相关的技能"
 
-    lines = [f"--- 匹配度 {s:.1f} ---  {c[:500]}" for s, c in top]
+    lines = []
+    for score, name, desc, content in top:
+        header = f"--- 匹配度 {score:.1f} --- # {name}"
+        if desc:
+            header += f"\n{desc}"
+        lines.append(f"{header}\n{content[:500]}")
     return "\n\n".join(lines)
 
 

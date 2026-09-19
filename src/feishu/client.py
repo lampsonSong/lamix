@@ -56,6 +56,43 @@ class FeishuClient:
             "Content-Type": "application/json; charset=utf-8",
         }
 
+    def _invalidate_token(self) -> None:
+        """强制下次调用重新取 token（服务端吊销场景：99991663/99991668）。
+
+        2026-09-19 实测：缓存 token 被飞书服务端吊销后，TTL 检查照样通过，
+        所有请求 400/99991663 直到进程重启。同凭据现铸的 token 有效，
+        说明不是凭据问题——需要"报错即弃缓存重试一次"的兜底。
+        """
+        self._token = None
+        self._token_expires_at = 0.0
+
+    def _is_token_invalid(self, resp: "httpx.Response") -> bool:
+        """判断响应是否为 token 失效（400 + 99991663/99991668）。"""
+        if resp.status_code != 400:
+            return False
+        try:
+            return resp.json().get("code") in (99991663, 99991668)
+        except Exception:
+            return False
+
+    def _post_with_token_retry(self, url: str, **kw) -> "httpx.Response":
+        """POST 带 token 失效重试：失效 → 弃缓存重取 → 重试一次。"""
+        resp = self._http.post(url, headers=self._headers(), **kw)
+        if self._is_token_invalid(resp):
+            _logger.warning("token 被服务端吊销（%s），强制刷新重试", resp.json().get("code"))
+            self._invalidate_token()
+            resp = self._http.post(url, headers=self._headers(), **kw)
+        return resp
+
+    def _get_with_token_retry(self, url: str, **kw) -> "httpx.Response":
+        """GET 带 token 失效重试（同 _post_with_token_retry）。"""
+        resp = self._http.get(url, headers=self._headers(), **kw)
+        if self._is_token_invalid(resp):
+            _logger.warning("token 被服务端吊销（%s），强制刷新重试", resp.json().get("code"))
+            self._invalidate_token()
+            resp = self._http.get(url, headers=self._headers(), **kw)
+        return resp
+
     def send_message(
         self,
         receive_id: str,
@@ -74,10 +111,9 @@ class FeishuClient:
             "msg_type": "text",
             "content": json.dumps({"text": text}, ensure_ascii=False),
         }
-        resp = self._http.post(
+        resp = self._post_with_token_retry(
             f"{FEISHU_BASE}/im/v1/messages",
             params={"receive_id_type": receive_id_type},
-            headers=self._headers(),
             json=payload,
         )
         # 无论成功失败都打日志，方便排查 400 等错误
@@ -114,10 +150,9 @@ class FeishuClient:
             "msg_type": "interactive",
             "content": card_json,
         }
-        resp = self._http.post(
+        resp = self._post_with_token_retry(
             f"{FEISHU_BASE}/im/v1/messages",
             params={"receive_id_type": receive_id_type},
-            headers=self._headers(),
             json=payload,
         )
         _logger.info(f"飞书卡片发送 status={resp.status_code} receive_id={receive_id} type={receive_id_type}")
@@ -137,7 +172,6 @@ class FeishuClient:
         """更新已发送的卡片消息内容（飞书 PATCH API）。"""
         resp = self._http.patch(
             f"{FEISHU_BASE}/im/v1/messages/{message_id}",
-            headers=self._headers(),
             json={"content": json.dumps(card, ensure_ascii=False)},
         )
         resp.raise_for_status()
@@ -244,7 +278,7 @@ class FeishuClient:
         page_size: int = 10,
     ) -> list[dict[str, Any]]:
         """从指定会话拉取最近消息列表（轮询方式）。"""
-        resp = self._http.get(
+        resp = self._get_with_token_retry(
             f"{FEISHU_BASE}/im/v1/messages",
             params={
                 "container_id_type": container_id_type,
@@ -252,7 +286,6 @@ class FeishuClient:
                 "page_size": page_size,
                 "sort_type": "ByCreateTimeDesc",
             },
-            headers=self._headers(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -267,9 +300,8 @@ class FeishuClient:
         Returns:
             消息 dict（含 body/content 等）或 None（消息不存在或无权限）。
         """
-        resp = self._http.get(
+        resp = self._get_with_token_retry(
             f"{FEISHU_BASE}/im/v1/messages/{message_id}",
-            headers=self._headers(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -280,9 +312,8 @@ class FeishuClient:
 
     def get_bot_info(self) -> dict[str, Any]:
         """获取机器人自身信息，用于测试连接是否正常。"""
-        resp = self._http.get(
+        resp = self._get_with_token_retry(
             f"{FEISHU_BASE}/bot/v3/info",
-            headers=self._headers(),
         )
         resp.raise_for_status()
         return resp.json()
