@@ -481,15 +481,28 @@ def _start_watchdog() -> None:
 
 
 def _wait_daemon_ready(timeout: int = 15) -> bool:
-    """等待 daemon 心跳文件出现并校验身份是 daemon。"""
+    """等待 daemon 心跳文件出现并校验身份是 daemon。
+
+    frozen (Mac App)：daemon 的 ps 命令行只有 "lamix"（子进程），
+    无法通过 pid_role() 识别。换用心跳文件判断。
+    """
     import time
+    from src.core.process_launch import is_frozen
 
     log_dir = Path.home() / ".lamix" / "logs"
     daemon_pid_path = log_dir / "daemon.pid"
     for _ in range(timeout):
         time.sleep(1)
         pid, _role = read_pid_record(daemon_pid_path)
-        if pid and is_running_as(pid, ROLE_DAEMON):
+        if pid is None:
+            continue
+        # frozen Mac App：命令行身份识别无效，改用心跳文件
+        if is_frozen():
+            from src.core.heartbeat import HEARTBEAT_DIR
+            hb = HEARTBEAT_DIR / f"{pid}.json"
+            if hb.exists():
+                return True
+        elif is_running_as(pid, ROLE_DAEMON):
             return True
     return False
 
@@ -531,11 +544,30 @@ def gateway_start() -> None:
         )
 
 
+def _unload_launchd_if_needed() -> None:
+    """macOS: 如果 launchd 托管着 lamix，先 unload 掉，阻止它复活进程。"""
+    if sys.platform != "darwin":
+        return
+    plist = Path.home() / "Library" / "LaunchAgents" / "com.lamix.gateway.plist"
+    if not plist.exists():
+        return
+    try:
+        subprocess.run(
+            ["launchctl", "unload", str(plist)],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def gateway_stop() -> None:
     """lamix gateway stop: 停止 daemon + watchdog。"""
     import subprocess, signal, time
 
     log_dir = Path.home() / ".lamix" / "logs"
+
+    # macOS: 先 unload launchd，防止它复活进程
+    _unload_launchd_if_needed()
 
     # 停止 daemon
     daemon_pid, _ = read_pid_record(log_dir / "daemon.pid")
@@ -573,7 +605,8 @@ def gateway_stop() -> None:
             except Exception:
                 pass
     else:
-        for name in ["src.daemon", "src.watchdog"]:
+        # Mac App 包里进程名是 "lamix"，源码是 "src.daemon" / "src.watchdog"
+        for name in ["src.daemon", "src.watchdog", "lamix", "gateway-start"]:
             result = subprocess.run(
                 ["pgrep", "-f", name], capture_output=True, text=True
             )

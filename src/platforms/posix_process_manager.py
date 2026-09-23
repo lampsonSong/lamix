@@ -122,7 +122,8 @@ class PosixProcessManager(ProcessManager):
                 pass
 
         # 进程不存在（包括僵尸），直接清理
-        if not self.is_alive(pid):
+        # exclude_zombie=True：避免把 zombie wrapper 当成活进程，从而误判
+        if not self.is_alive(pid, exclude_zombie=True):
             _cleanup_pid_file()
             return True
 
@@ -131,7 +132,7 @@ class PosixProcessManager(ProcessManager):
                 os.kill(pid, signal.SIGTERM)
                 # 等待最多 5 秒
                 for _ in range(50):
-                    if not self.is_alive(pid):
+                    if not self.is_alive(pid, exclude_zombie=True):
                         return True
                     time.sleep(0.1)
                 logger.warning("进程 %d 未在 5s 内退出，强杀", pid)
@@ -139,12 +140,12 @@ class PosixProcessManager(ProcessManager):
             os.kill(pid, signal.SIGKILL)
             time.sleep(0.2)
             # SIGKILL 后再检查（僵尸则 is_alive 返回 False）
-            dead = not self.is_alive(pid)
+            dead = not self.is_alive(pid, exclude_zombie=True)
             if dead:
                 _cleanup_pid_file()
             return dead
         except OSError:
-            dead = not self.is_alive(pid)
+            dead = not self.is_alive(pid, exclude_zombie=True)
             if dead:
                 _cleanup_pid_file()
             return dead
@@ -167,7 +168,10 @@ class PosixProcessManager(ProcessManager):
         old_pid, _ = read_pid_record(pid_file)
 
         if old_pid is not None:
-            self.kill_process(old_pid, graceful=True)
+            killed = self.kill_process(old_pid, graceful=True)
+            if not killed:
+                logger.warning("无法终止旧 daemon (PID=%s)，跳过重启", old_pid)
+                return False
 
         # 确保 PID 文件被清理（kill_process 内部已清理，这里兜底）
         pid_file.unlink(missing_ok=True)

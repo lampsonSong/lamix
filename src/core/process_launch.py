@@ -24,7 +24,8 @@ ROLE_CLI = "cli"
 
 # 用于识别进程角色的命令行子串（针对源码 / frozen 两种启动方式都能命中）
 _DAEMON_MARKERS = ("src.daemon", "daemon-run")
-_WATCHDOG_MARKERS = ("src.watchdog", "watchdog-run")
+# macOS Mac App (frozen bundle) 里 daemon 通过 "gateway start" 拉起
+_WATCHDOG_MARKERS = ("src.watchdog", "watchdog-run", "gateway watchdog-run")
 
 
 def is_frozen() -> bool:
