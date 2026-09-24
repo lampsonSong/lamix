@@ -224,6 +224,7 @@ class PosixProcessManager(ProcessManager):
             proc = subprocess.Popen(
                 daemon_command,
                 cwd=str(cwd) if cwd else None,
+                stdin=subprocess.DEVNULL,  # 避免 launchd 环境下 stdin 无效导致 PyInstaller Python 无法初始化标准流
                 stdout=stdout_log,
                 stderr=stderr_log,
                 start_new_session=True,  # detach from parent process group
