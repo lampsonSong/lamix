@@ -238,7 +238,7 @@ class TestBugC_NotifyCooldown:
 
         notify_path = tmp_path / "last_online_notify.json"
 
-        with patch("src.daemon._LAST_NOTIFY_PATH", notify_path):
+        with patch("src.daemon_boot._LAST_NOTIFY_PATH", notify_path):
             # 文件不存在 → 不冷却
             assert _check_notify_cooldown() is False
 
@@ -254,7 +254,7 @@ class TestBugC_NotifyCooldown:
 
         notify_path = tmp_path / "last_online_notify.json"
 
-        with patch("src.daemon._LAST_NOTIFY_PATH", notify_path):
+        with patch("src.daemon_boot._LAST_NOTIFY_PATH", notify_path):
             # 写入"刚发过"的时间戳
             notify_path.write_text(
                 json.dumps({"last_sent": datetime.now().isoformat()}),
@@ -269,7 +269,7 @@ class TestBugC_NotifyCooldown:
         notify_path = tmp_path / "last_online_notify.json"
         old_time = (datetime.now() - timedelta(seconds=700)).isoformat()
 
-        with patch("src.daemon._LAST_NOTIFY_PATH", notify_path):
+        with patch("src.daemon_boot._LAST_NOTIFY_PATH", notify_path):
             notify_path.write_text(
                 json.dumps({"last_sent": old_time}),
                 encoding="utf-8",
@@ -283,7 +283,7 @@ class TestBugC_NotifyCooldown:
         notify_path = tmp_path / "last_online_notify.json"
         notify_path.write_text("not json {{{{", encoding="utf-8")
 
-        with patch("src.daemon._LAST_NOTIFY_PATH", notify_path):
+        with patch("src.daemon_boot._LAST_NOTIFY_PATH", notify_path):
             assert _check_notify_cooldown() is False
 
     def test_send_boot_notification_skips_during_cooldown(self, tmp_path):
@@ -305,8 +305,8 @@ class TestBugC_NotifyCooldown:
             }
         }
 
-        with patch("src.daemon._LAST_NOTIFY_PATH", notify_path), \
-             patch("src.daemon.FeishuClient", create=True) as mock_client_cls:
+        with patch("src.daemon_boot._LAST_NOTIFY_PATH", notify_path), \
+             patch("src.daemon_boot.FeishuClient", create=True) as mock_client_cls:
             _send_boot_notification(config, pid=999, is_recovery=False)
             # FeishuClient 不应被实例化（冷却跳过了整个发送逻辑）
             mock_client_cls.assert_not_called()

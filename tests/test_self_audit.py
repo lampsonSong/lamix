@@ -27,16 +27,20 @@ def temp_lamix_dir(tmp_path):
     skills_dir.mkdir()
     projects_dir.mkdir()
 
-    import src.core.self_audit as sa
-    old_skills = sa.SKILLS_DIR
-    old_projects = sa.PROJECTS_DIR
-    sa.SKILLS_DIR = skills_dir
-    sa.PROJECTS_DIR = projects_dir
+    from src.core.self_audit import scanners, lifecycle
+    old_skills = scanners.SKILLS_DIR
+    old_projects = scanners.PROJECTS_DIR
+    scanners.SKILLS_DIR = skills_dir
+    scanners.PROJECTS_DIR = projects_dir
+    lifecycle.SKILLS_DIR = skills_dir
+    lifecycle.PROJECTS_DIR = projects_dir
 
     yield tmp_path, skills_dir, projects_dir
 
-    sa.SKILLS_DIR = old_skills
-    sa.PROJECTS_DIR = old_projects
+    scanners.SKILLS_DIR = old_skills
+    scanners.PROJECTS_DIR = old_projects
+    lifecycle.SKILLS_DIR = old_skills
+    lifecycle.PROJECTS_DIR = old_projects
 
 
 # ── AuditReport ────────────────────────────────────────────────────────────────

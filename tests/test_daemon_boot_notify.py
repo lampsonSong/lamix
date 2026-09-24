@@ -16,7 +16,7 @@ def test_single_task():
     """单条 boot_task 时生成正确的通知文本。"""
     tasks = [{"task": "验证 xxx 功能"}]
 
-    with patch("src.daemon._notify_user") as mock_notify:
+    with patch("src.daemon_boot._notify_user") as mock_notify:
         _notify_boot_tasks_running(config=None, tasks=tasks)
         mock_notify.assert_called_once_with(
             "⚡ 正在执行 1 条启动待办任务：\n1. 验证 xxx 功能",
@@ -31,7 +31,7 @@ def test_multiple_tasks():
         {"task": "验证 C"},
     ]
 
-    with patch("src.daemon._notify_user") as mock_notify:
+    with patch("src.daemon_boot._notify_user") as mock_notify:
         _notify_boot_tasks_running(config=None, tasks=tasks)
         expected = "⚡ 正在执行 3 条启动待办任务：\n1. 验证 A\n2. 验证 B\n3. 验证 C"
         mock_notify.assert_called_once_with(expected)
@@ -42,7 +42,7 @@ def test_long_task_description_truncated():
     long_desc = "A" * 100
     tasks = [{"task": long_desc}]
 
-    with patch("src.daemon._notify_user") as mock_notify:
+    with patch("src.daemon_boot._notify_user") as mock_notify:
         _notify_boot_tasks_running(config=None, tasks=tasks)
         sent_text = mock_notify.call_args[0][0]
         task_line = sent_text.split("\n")[1]
@@ -54,7 +54,7 @@ def test_missing_task_key_falls_back_to_str():
     """task 字典没有 task key 时用 str(t) 兜底。"""
     tasks = [{"desc": "something"}]
 
-    with patch("src.daemon._notify_user") as mock_notify:
+    with patch("src.daemon_boot._notify_user") as mock_notify:
         _notify_boot_tasks_running(config=None, tasks=tasks)
         sent_text = mock_notify.call_args[0][0]
         assert "1. {'desc': 'something'}" in sent_text

@@ -58,7 +58,7 @@ class TestLastActiveDate:
         from src.core.self_audit import touch_last_active_date, _get_last_active_date
 
         fake_file = tmp_path / ".last_active_date"
-        with patch("src.core.self_audit._LAST_ACTIVE_FILE", fake_file):
+        with patch("src.core.self_audit.lifecycle._LAST_ACTIVE_FILE", fake_file):
             touch_last_active_date()
             result = _get_last_active_date()
 
@@ -70,7 +70,7 @@ class TestLastActiveDate:
 
         fake_file = tmp_path / ".last_active_date"
         fake_file.write_text("", encoding="utf-8")
-        with patch("src.core.self_audit._LAST_ACTIVE_FILE", fake_file), \
+        with patch("src.core.self_audit.lifecycle._LAST_ACTIVE_FILE", fake_file), \
              patch("src.core.heartbeat.get_last_activity_time", return_value=None):
             result = _get_last_active_date()
         assert result is None
@@ -83,7 +83,7 @@ class TestLastActiveDate:
         from datetime import datetime
         mock_dt = datetime(2026, 5, 10, 12, 0, 0)
 
-        with patch("src.core.self_audit._LAST_ACTIVE_FILE", fake_file), \
+        with patch("src.core.self_audit.lifecycle._LAST_ACTIVE_FILE", fake_file), \
              patch("src.core.heartbeat.get_last_activity_time", return_value=mock_dt):
             result = _get_last_active_date()
 
@@ -94,7 +94,7 @@ class TestLastActiveDate:
         from src.core.self_audit import _get_last_active_date
 
         fake_file = tmp_path / ".last_active_date"
-        with patch("src.core.self_audit._LAST_ACTIVE_FILE", fake_file), \
+        with patch("src.core.self_audit.lifecycle._LAST_ACTIVE_FILE", fake_file), \
              patch("src.core.heartbeat.get_last_activity_time", return_value=None):
             result = _get_last_active_date()
         assert result is None
@@ -125,9 +125,9 @@ class TestArchiveAnchorDate:
             "invocation_count": 0,
         })
 
-        with patch("src.core.self_audit.SKILLS_DIR", skills_dir), \
-             patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
-             patch("src.core.self_audit._get_last_active_date", return_value=anchor):
+        with patch("src.core.self_audit.lifecycle.SKILLS_DIR", skills_dir), \
+             patch("src.core.self_audit.lifecycle.PROJECTS_DIR", projects_dir), \
+             patch("src.core.self_audit.lifecycle._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
 
         skill_findings = [f for f in findings if f.category == "skill"]
@@ -151,9 +151,9 @@ class TestArchiveAnchorDate:
             "invocation_count": 5,
         })
 
-        with patch("src.core.self_audit.SKILLS_DIR", skills_dir), \
-             patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
-             patch("src.core.self_audit._get_last_active_date", return_value=anchor):
+        with patch("src.core.self_audit.lifecycle.SKILLS_DIR", skills_dir), \
+             patch("src.core.self_audit.lifecycle.PROJECTS_DIR", projects_dir), \
+             patch("src.core.self_audit.lifecycle._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
 
         skill_findings = [f for f in findings if f.category == "skill"]
@@ -179,9 +179,9 @@ class TestSkillArchiveRules:
         if anchor is None:
             anchor = date.today()
 
-        with patch("src.core.self_audit.SKILLS_DIR", skills_dir), \
-             patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
-             patch("src.core.self_audit._get_last_active_date", return_value=anchor):
+        with patch("src.core.self_audit.lifecycle.SKILLS_DIR", skills_dir), \
+             patch("src.core.self_audit.lifecycle.PROJECTS_DIR", projects_dir), \
+             patch("src.core.self_audit.lifecycle._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
         return [f for f in findings if f.category == "skill"], skill_md
 
@@ -251,9 +251,9 @@ class TestInfoArchiveRules:
         if anchor is None:
             anchor = date.today()
 
-        with patch("src.core.self_audit.SKILLS_DIR", skills_dir), \
-             patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
-             patch("src.core.self_audit._get_last_active_date", return_value=anchor):
+        with patch("src.core.self_audit.lifecycle.SKILLS_DIR", skills_dir), \
+             patch("src.core.self_audit.lifecycle.PROJECTS_DIR", projects_dir), \
+             patch("src.core.self_audit.lifecycle._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
         return [f for f in findings if f.category == "info"], info_dir / "test-info.md"
 
@@ -311,9 +311,9 @@ class TestProjectArchiveRules:
         if anchor is None:
             anchor = date.today()
 
-        with patch("src.core.self_audit.SKILLS_DIR", skills_dir), \
-             patch("src.core.self_audit.PROJECTS_DIR", projects_dir), \
-             patch("src.core.self_audit._get_last_active_date", return_value=anchor):
+        with patch("src.core.self_audit.lifecycle.SKILLS_DIR", skills_dir), \
+             patch("src.core.self_audit.lifecycle.PROJECTS_DIR", projects_dir), \
+             patch("src.core.self_audit.lifecycle._get_last_active_date", return_value=anchor):
             findings = cleanup_stale_knowledge(auto_fix=True)
         return [f for f in findings if f.category == "project"], projects_dir / "test-project.md"
 
