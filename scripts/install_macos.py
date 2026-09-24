@@ -213,13 +213,63 @@ def _launchctl(*args: str, check: bool = False, quiet: bool = False) -> subproce
     return result
 
 
+def _kill_lamix_leftovers() -> None:
+    """兜底杀掉所有残留 lamix 进程（daemon + watchdog + 任何子进程）。
+
+    Lamix 自建 watchdog + 单实例锁：launchctl bootout 只发 SIGTERM，若
+    watchdog 抢先把 daemon 救回，或 daemon 忽略 SIGTERM，后续 kickstart
+    的新实例会因为「已有 daemon 在跑」直接退出。这里 pgrep 兜底：
+      1. pattern 匹配 /Applications/Lamix.app/Contents/MacOS/lamix 的所有进程
+      2. SIGTERM，等 2s，还活着就 SIGKILL
+    """
+    pattern = f"{INSTALLED_APP}/Contents/MacOS/{BINARY_NAME}"
+    result = subprocess.run(
+        ["pgrep", "-f", pattern],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+
+    pids = [int(p) for p in result.stdout.strip().split("\n") if p.strip()]
+    _print(f"    发现残留进程 {pids}，逐一终止...")
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive:
+            _print(f"    残留进程已全部退出")
+            return
+        time.sleep(0.1)
+
+    # 还没走的强杀
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            _print(f"    SIGKILL PID={pid}")
+        except ProcessLookupError:
+            pass
+
+
 def bootstrap_and_start() -> None:
     """加载并启动 LaunchAgent。
 
     步骤：
       1. bootout 旧服务（忽略失败——首次安装时它本来就不存在）
-      2. bootstrap 新 plist
-      3. kickstart 立即启动
+      2. pgrep 兜底杀残留（防 lamix 自建 watchdog 救回旧 daemon）
+      3. bootstrap 新 plist
+      4. kickstart 立即启动
     """
     target = f"gui/{_uid()}"
     service_target = f"{target}/{LAUNCHD_LABEL}"
@@ -228,14 +278,17 @@ def bootstrap_and_start() -> None:
     # 1. bootout 旧版（首次安装会失败，安全忽略）
     _launchctl("bootout", service_target, quiet=True)
 
-    # 2. bootstrap 新 plist
+    # 2. 兜底：确保没有旧 daemon/watchdog 残留
+    _kill_lamix_leftovers()
+
+    # 3. bootstrap 新 plist
     result = _launchctl("bootstrap", target, str(LAUNCH_AGENT_PLIST))
     if result.returncode != 0:
         _print(f"❌ launchctl bootstrap 失败：{result.stderr.strip()}")
         _print("   常见原因：plist 语法错误 或 服务标签冲突。")
         sys.exit(1)
 
-    # 3. kickstart 立即启动
+    # 4. kickstart 立即启动
     _launchctl("kickstart", service_target)
     _print("✓ LaunchAgent 已加载并启动")
 
