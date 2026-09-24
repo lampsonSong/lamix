@@ -218,13 +218,14 @@ def _kill_lamix_leftovers() -> None:
 
     Lamix 自建 watchdog + 单实例锁：launchctl bootout 只发 SIGTERM，若
     watchdog 抢先把 daemon 救回，或 daemon 忽略 SIGTERM，后续 kickstart
-    的新实例会因为「已有 daemon 在跑」直接退出。这里 pgrep 兜底：
-      1. pattern 匹配 /Applications/Lamix.app/Contents/MacOS/lamix 的所有进程
+    的新实例会因为「已有 daemon 在跑」直接退出。这里兜底：
+      1. pgrep -x lamix 按进程名精确匹配（daemon 用 setproctitle 改名为 lamix，
+         watchdog 的 argv[0] basename 也是 lamix，两个都会被 -x 命中；
+         pgrep -f 完整路径匹配不到 setproctitle 改过名的 daemon）
       2. SIGTERM，等 2s，还活着就 SIGKILL
     """
-    pattern = f"{INSTALLED_APP}/Contents/MacOS/{BINARY_NAME}"
     result = subprocess.run(
-        ["pgrep", "-f", pattern],
+        ["pgrep", "-x", "lamix"],
         capture_output=True, text=True, timeout=5,
     )
     if result.returncode != 0 or not result.stdout.strip():
