@@ -266,7 +266,8 @@ def _kill_other_lamix_processes(my_pid: int) -> None:
     # 最终确认
     final_alive = [p for p in other_pids if _pid_exists(p)]
     if final_alive:
-        logger.error(f"[daemon] 无法杀掉残留进程 {final_alive}，仍然启动（可能为僵尸）")
+        logger.error(f"[daemon] 无法杀掉残留进程 {final_alive}（可能为僵尸），拒绝启动")
+        sys.exit(1)
     else:
         logger.info(f"[daemon] 已清理 {len(other_pids)} 个残留 lamix 进程")
 

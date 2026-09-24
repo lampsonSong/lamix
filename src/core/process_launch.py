@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.core.config import LAMIX_DIR
+
 
 ROLE_DAEMON = "daemon"
 ROLE_WATCHDOG = "watchdog"
@@ -98,6 +100,9 @@ def pid_role(pid: int) -> str | None:
 
     返回 "daemon" / "watchdog" / "cli" / None（未知或已死）。
     先匹配 daemon/watchdog 的强特征子串，再兜底判断是否是 ``lamix cli`` 形态。
+
+    PyInstaller 打包后 ps -o command= 对 daemon 只返回 "lamix"（argv[0] 被重置），
+    此时通过心跳文件辅助判断：daemon 会在 heartbeat/ 目录写 PID.json。
     """
     cmd = _ps_command(pid)
     if not cmd:
@@ -115,6 +120,10 @@ def pid_role(pid: int) -> str | None:
             if prev in ("-m",) or prev.endswith("src.cli"):
                 continue
             return ROLE_CLI
+    # PyInstaller 打包后 daemon 进程名只剩 "lamix"，无任何参数子串可匹配。
+    # 通过心跳文件辅助判断：daemon 会在 heartbeat/<pid>.json 写心跳，cli 不会。
+    if cmd == "lamix" and (LAMIX_DIR / "heartbeat" / f"{pid}.json").exists():
+        return ROLE_DAEMON
     return None
 
 
