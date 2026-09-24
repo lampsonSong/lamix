@@ -179,47 +179,84 @@ def _fix_config_paths() -> None:
             logger.warning("Failed to update config.yaml paths: %s", ex)
 
 
+_MIGRATION_VERSION = "v3"
+
+
 def _migrate_old_dirs() -> None:
+    """把顶层 ~/.lamix/{skills,projects,info}/ 下的遗留文件搬进 memory/ 子目录。
+
+    这些顶层目录是 memory/ 迁移（2026-05）之前的旧位置，且 LLM 用 file_write 时
+    可能又往里写过——同名冲突时给源文件加 -legacy-YYYYMMDD 后缀移入，不覆盖已有。
+    """
     import shutil
+    from datetime import date
+
     migrated = LAMIX_DIR / ".memory_migrated"
-    if migrated.exists():
-        # 即使已迁移，仍需检查 config.yaml 路径是否过时
+    if migrated.exists() and migrated.read_text(encoding="utf-8").strip() == _MIGRATION_VERSION:
         _fix_config_paths()
         return
-    old_skills = LAMIX_DIR / "memory" / "skills"
-    old_projects = LAMIX_DIR / "memory" / "projects"
-    old_info = LAMIX_DIR / "memory" / "info"
-    moved = False
-    if old_skills.is_dir() and any(old_skills.iterdir()):
-        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        for item in old_skills.iterdir():
-            dest = SKILLS_DIR / item.name
-            if not dest.exists():
+
+    old_skills = LAMIX_DIR / "skills"
+    old_projects = LAMIX_DIR / "projects"
+    old_info = LAMIX_DIR / "info"
+
+    moved_any = False
+
+    def _move_all(src_dir: Path, dst_dir: Path) -> bool:
+        if not src_dir.is_dir():
+            return False
+        items = list(src_dir.iterdir())
+        if not items:
+            try:
+                src_dir.rmdir()
+            except OSError:
+                pass
+            return False
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        stamp = date.today().strftime("%Y%m%d")
+        moved = False
+        for item in items:
+            dest = dst_dir / item.name
+            if dest.exists():
+                # 冲突：源文件加 -legacy-YYYYMMDD 后缀
+                stem, dot, suffix = item.name.rpartition(".")
+                if dot:
+                    legacy_name = f"{stem}-legacy-{stamp}.{suffix}"
+                else:
+                    legacy_name = f"{item.name}-legacy-{stamp}"
+                dest = dst_dir / legacy_name
+                # 冲突升级到 -legacy-YYYYMMDD-N
+                n = 1
+                while dest.exists():
+                    if dot:
+                        dest = dst_dir / f"{stem}-legacy-{stamp}-{n}.{suffix}"
+                    else:
+                        dest = dst_dir / f"{item.name}-legacy-{stamp}-{n}"
+                    n += 1
+            try:
                 shutil.move(str(item), str(dest))
                 moved = True
-        if not any(old_skills.iterdir()):
-            old_skills.rmdir()
-    if old_projects.is_dir() and any(old_projects.iterdir()):
-        PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        for item in old_projects.iterdir():
-            dest = PROJECTS_DIR / item.name
-            if not dest.exists():
-                shutil.move(str(item), str(dest))
-                moved = True
-        if not any(old_projects.iterdir()):
-            old_projects.rmdir()
-    if old_info.is_dir() and any(old_info.iterdir()):
-        INFO_DIR.mkdir(parents=True, exist_ok=True)
-        for item in old_info.iterdir():
-            dest = INFO_DIR / item.name
-            if not dest.exists():
-                shutil.move(str(item), str(dest))
-                moved = True
-        if not any(old_info.iterdir()):
-            old_info.rmdir()
-    if moved:
-        migrated.write_text("v2", encoding="utf-8")
-    # 迁移完成后修正 config.yaml 中的旧路径
+                logger.info("[migration] moved %s -> %s", item, dest)
+            except OSError as e:
+                logger.warning("[migration] move failed for %s: %s", item, e)
+        # 空目录清理
+        try:
+            if not any(src_dir.iterdir()):
+                src_dir.rmdir()
+        except OSError:
+            pass
+        return moved
+
+    if _move_all(old_skills, SKILLS_DIR):
+        moved_any = True
+    if _move_all(old_projects, PROJECTS_DIR):
+        moved_any = True
+    if _move_all(old_info, INFO_DIR):
+        moved_any = True
+
+    if moved_any or not migrated.exists():
+        migrated.write_text(_MIGRATION_VERSION, encoding="utf-8")
+
     _fix_config_paths()
 
 

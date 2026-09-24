@@ -2,16 +2,42 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 
+logger = logging.getLogger(__name__)
+
+
 MAX_READ_SIZE = 100 * 1024  # 100KB
+
+# 顶层 ~/.lamix/{info,projects,skills}/ 是历史遗留位置，凡是落到那里的写入都自动
+# 改写到 ~/.lamix/memory/<name>/，兜底 LLM 猜错路径。
+_LAMIX_DIR = Path.home() / ".lamix"
+_LEGACY_TOPLEVEL = {"info", "projects", "skills"}
 
 
 def _expand(path: str) -> Path:
     return Path(os.path.expanduser(path)).resolve()
+
+
+def _redirect_legacy_lamix_path(p: Path) -> Path:
+    """若目标位于 ~/.lamix/{info,projects,skills}/... 顶层，改写到 memory/ 子目录。
+
+    memory/ 前缀已经在了则原样返回。返回的路径可能仍指向别处（如非 lamix 目录）。
+    """
+    try:
+        rel = p.relative_to(_LAMIX_DIR)
+    except ValueError:
+        return p
+    parts = rel.parts
+    if not parts or parts[0] not in _LEGACY_TOPLEVEL:
+        return p
+    redirected = _LAMIX_DIR / "memory" / rel
+    logger.info("[fileops] path corrected: %s -> %s", p, redirected)
+    return redirected
 
 
 def file_read(path: str, offset: int = 0, limit: int | None = None) -> str:
@@ -43,8 +69,11 @@ def file_read(path: str, offset: int = 0, limit: int | None = None) -> str:
 
 
 def file_write(path: str, content: str) -> str:
-    """写入文件，自动创建父目录。"""
-    p = _expand(path)
+    """写入文件，自动创建父目录。
+
+    ~/.lamix/{info,projects,skills}/ 顶层写入会自动改写到 memory/ 子目录。
+    """
+    p = _redirect_legacy_lamix_path(_expand(path))
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")

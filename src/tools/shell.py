@@ -59,6 +59,17 @@ _GLOB_ABUSE_RE = re.compile(
     r"\b(cat|rm|mv|cp|less|head|tail)\b[^\n#;]*?[\*]"
 )
 
+# 顶层 ~/.lamix/{info,projects,skills}/ 写入检测（沉淀文件应落在 memory/ 子目录）
+# 匹配 `>`/`>>`/`tee`/`tee -a` 后面接 ~/.lamix/(info|projects|skills)/
+_LEGACY_WRITE_RE = re.compile(
+    r"""(?:>>|>|tee\s+(?:-a\s+)?)      # 写重定向 / tee
+        \s*['\"]?                        # 可选引号
+        (?:~|\$HOME|/Users/[^/\s]+)     # 家目录形式
+        /\.lamix/(?:info|projects|skills)/   # 顶层旧路径（不含 memory/）
+    """,
+    re.VERBOSE,
+)
+
 # PTY 输出上限，防止 openconnect 等长时间命令撑爆内存
 MAX_OUTPUT_BYTES = 500_000
 
@@ -79,6 +90,11 @@ def is_dangerous(command: str) -> bool:
 
 def _has_glob_abuse(command: str) -> bool:
     return bool(_GLOB_ABUSE_RE.search(command))
+
+
+def _hits_legacy_lamix_write(command: str) -> bool:
+    """检测是否要往 ~/.lamix/{info,projects,skills}/ 顶层写。"""
+    return bool(_LEGACY_WRITE_RE.search(command))
 
 
 def _is_cli_interrupted() -> bool:
@@ -318,6 +334,12 @@ def execute_shell(command: str, timeout: int = 30) -> str:
             "[拒绝执行] 检测到对 cat/rm 等使用通配符（如 *.py、src/*），"
             "请改为明确路径、使用 `search` 工具或分文件读取，"
             "避免一次展开大量文件。"
+        )
+    if _hits_legacy_lamix_write(command):
+        return (
+            "[提示] 沉淀文件请写到 ~/.lamix/memory/{info,projects,skills}/ 子目录，"
+            "而不是顶层 ~/.lamix/{info,projects,skills}/。"
+            "请把命令里的路径加上 memory/ 前缀后重试。"
         )
 
     try:
