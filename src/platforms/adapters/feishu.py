@@ -239,6 +239,11 @@ class FeishuAdapter(BasePlatformAdapter):
             .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(
                 lambda data: None
             )
+            # 表情回应事件：app 事件订阅含 reaction created/deleted（emoji ack 自身
+            # 也会触发），不处理但要注册 no-op，否则 SDK 抛 processor not found
+            # 并向飞书回 500，导致日志刷 error 且事件被重推
+            .register_p2_im_message_reaction_created_v1(lambda data: None)
+            .register_p2_im_message_reaction_deleted_v1(lambda data: None)
             .build()
         )
         self._ws_client = lark.ws.Client(
