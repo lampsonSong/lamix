@@ -134,3 +134,64 @@ class TestFeishuAdapter:
         assert FeishuAdapter._should_use_card("| col1 | col2 |\n|---|") is True
         assert FeishuAdapter._should_use_card("plain text") is False
         assert FeishuAdapter._should_use_card("hello world") is False
+
+
+class TestSendWithRetry:
+    """_send_with_retry 重试逻辑测试：传输错误重试 / 业务错误不重试"""
+
+    def _adapter(self):
+        from src.platforms.adapters.feishu import FeishuAdapter
+        # _send_with_retry 不依赖实例状态，绕过需要 config 的 __init__
+        return object.__new__(FeishuAdapter)
+
+    def test_transport_error_retries_then_none(self):
+        """传输错误（ConnectionResetError）重试 max_retries 次后返回 None"""
+        from unittest.mock import patch
+        adapter = self._adapter()
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+        with patch("src.platforms.adapters.feishu.time.sleep") as mock_sleep:
+            result = adapter._send_with_retry(flaky, max_retries=2, retry_interval=0)
+
+        assert result is None
+        assert len(calls) == 3  # 1 次初始 + 2 次重试
+        assert mock_sleep.call_count == 2
+
+    def test_api_error_no_retry(self):
+        """FeishuAPIError 业务错误立即抛出，不 sleep 不重试"""
+        from unittest.mock import patch
+        from src.feishu.client import FeishuAPIError
+        adapter = self._adapter()
+        calls = []
+
+        def biz_error():
+            calls.append(1)
+            raise FeishuAPIError("feishu api error: code=230002 msg=Bot/User can NOT be out of the chat")
+
+        with patch("src.platforms.adapters.feishu.time.sleep") as mock_sleep:
+            with pytest.raises(FeishuAPIError):
+                adapter._send_with_retry(biz_error, max_retries=2, retry_interval=0)
+
+        assert len(calls) == 1  # 只调用 1 次，未重试
+        assert mock_sleep.call_count == 0
+
+    def test_api_error_not_caught_by_oserror_branch(self):
+        """FeishuAPIError 不是 OSError 子类（防止回归为可重试异常）"""
+        from src.feishu.client import FeishuAPIError
+        assert not issubclass(FeishuAPIError, OSError)
+        assert issubclass(FeishuAPIError, RuntimeError)  # 兼容既有 except RuntimeError
+
+    def test_success_passthrough(self):
+        """正常返回原样透传，不 sleep"""
+        from unittest.mock import patch
+        adapter = self._adapter()
+
+        with patch("src.platforms.adapters.feishu.time.sleep") as mock_sleep:
+            result = adapter._send_with_retry(lambda: "msg_id_123")
+
+        assert result == "msg_id_123"
+        assert mock_sleep.call_count == 0

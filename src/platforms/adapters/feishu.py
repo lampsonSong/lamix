@@ -19,7 +19,7 @@ import json
 import queue
 import re
 
-from src.feishu.client import FeishuClient
+from src.feishu.client import FeishuClient, FeishuAPIError
 import threading
 import time
 from typing import Any
@@ -173,12 +173,19 @@ class FeishuAdapter(BasePlatformAdapter):
         return text.strip()
 
     def _send_with_retry(self, send_fn, *args, max_retries: int = 2, retry_interval: float = 1.5, **kwargs):
-        """带重试的发送包装器。send_fn 返回 (success, result) 或直接抛出异常。"""
+        """带重试的发送包装器。send_fn 返回 (success, result) 或直接抛出异常。
+
+        仅对网络传输类错误（ConnectionResetError/ConnectionAbortedError/OSError）重试；
+        FeishuAPIError 等 API 业务错误为确定性失败，直接抛出不重试。
+        """
         last_err = None
         for attempt in range(max_retries + 1):
             try:
                 result = send_fn(*args, **kwargs)
                 return result
+            except FeishuAPIError:
+                # API 业务错误（code != 0），重试无意义，直接抛出
+                raise
             except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
                 last_err = e
                 if attempt < max_retries:
@@ -243,7 +250,7 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             resp = self._lark_client.im.v1.message.create(request)
             if not resp.success():
-                raise ConnectionError(f"feishu api error: code={resp.code} msg={resp.msg}")
+                raise FeishuAPIError(f"feishu api error: code={resp.code} msg={resp.msg}")
             return getattr(resp.data, "message_id", None)
 
         try:

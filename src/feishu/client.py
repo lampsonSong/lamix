@@ -19,6 +19,13 @@ from src.core.constants import FEISHU_TOKEN_TTL as TOKEN_TTL
 _logger = logging.getLogger(__name__)
 
 
+class FeishuAPIError(RuntimeError):
+    """飞书 API 业务错误（code != 0），确定性失败，不应触发网络重试。
+
+    继承 RuntimeError 以兼容既有 except RuntimeError 调用点。
+    """
+
+
 class FeishuClient:
     """封装飞书 API 调用，自动管理 access token。"""
 
@@ -44,7 +51,7 @@ class FeishuClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书 token 获取失败：{data.get('msg')}")
+            raise FeishuAPIError(f"飞书 token 获取失败：{data.get('msg')}")
 
         self._token = data["tenant_access_token"]
         self._token_expires_at = time.time() + TOKEN_TTL
@@ -123,7 +130,7 @@ class FeishuClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书发送消息失败：{data.get('msg')} (code={data.get('code')})")
+            raise FeishuAPIError(f"飞书发送消息失败：{data.get('msg')} (code={data.get('code')})")
         return data
 
     def send_card(
@@ -161,7 +168,7 @@ class FeishuClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书发送卡片失败：{data.get('msg')} (code={data.get('code')})")
+            raise FeishuAPIError(f"飞书发送卡片失败：{data.get('msg')} (code={data.get('code')})")
         return data
 
     def update_message(
@@ -177,7 +184,7 @@ class FeishuClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书更新消息失败：{data.get('msg')} (code={data.get('code')})")
+            raise FeishuAPIError(f"飞书更新消息失败：{data.get('msg')} (code={data.get('code')})")
         return data
 
     def build_card(
@@ -290,7 +297,7 @@ class FeishuClient:
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
-            raise RuntimeError(f"飞书读取消息失败：{data.get('msg')} (code={data.get('code')})")
+            raise FeishuAPIError(f"飞书读取消息失败：{data.get('msg')} (code={data.get('code')})")
         items = data.get("data", {}).get("items", [])
         return items
 
@@ -335,7 +342,7 @@ def init_client(app_id: str, app_secret: str) -> None:
 
 def get_client() -> FeishuClient:
     if _client is None:
-        raise RuntimeError("飞书客户端未初始化，请先在配置中填写 feishu.app_id 和 feishu.app_secret。")
+        raise FeishuAPIError("飞书客户端未初始化，请先在配置中填写 feishu.app_id 和 feishu.app_secret。")
     return _client
 
 
