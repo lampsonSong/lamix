@@ -172,6 +172,24 @@ class FeishuAdapter(BasePlatformAdapter):
         text = re.sub(r'<think>[\s\S]*?</think>', '', text)
         return text.strip()
 
+    def _send_with_retry(self, send_fn, *args, max_retries: int = 2, retry_interval: float = 1.5, **kwargs):
+        """带重试的发送包装器。send_fn 返回 (success, result) 或直接抛出异常。"""
+        last_err = None
+        for attempt in range(max_retries + 1):
+            try:
+                result = send_fn(*args, **kwargs)
+                return result
+            except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
+                last_err = e
+                if attempt < max_retries:
+                    logger.warning(f"[feishu] 发送失败(attempt {attempt + 1}/{max_retries + 1}), {e}，{retry_interval}s 后重试...")
+                    time.sleep(retry_interval)
+                # 其他异常不重试，直接抛出
+            except Exception:
+                raise
+        logger.error(f"[feishu] 发送消息失败（重试 {max_retries} 次后仍失败）: {last_err}")
+        return None
+
     def _send_reply(self, chat_id: str, text: str) -> str | None:
         """发送最终回复，自动判断用卡片还是文本。返回回复消息的 message_id。"""
         text = self._strip_think_tags(text)
@@ -189,9 +207,9 @@ class FeishuAdapter(BasePlatformAdapter):
             return True
         return False
 
-    def _send_reply_as_card(self, chat_id: str, text: str) -> None:
-        """用 Markdown 卡片发送回复（表格/指标等结构化数据）。"""
-        try:
+    def _send_reply_as_card(self, chat_id: str, text: str) -> str | None:
+        """用 Markdown 卡片发送回复（表格/指标等结构化数据），失败时重试并降级为文本。"""
+        def _do_send_card():
             client = self._feishu_client
             title = "Lamix 回复"
             m = re.search(r"##\s*(.+)", text) or re.search(r"\*\*(.+?)\*\*", text)
@@ -201,41 +219,54 @@ class FeishuAdapter(BasePlatformAdapter):
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
             logger.info("[feishu] 卡片消息发送成功")
             return data.get("data", {}).get("message_id") if isinstance(data, dict) else None
+
+        try:
+            return self._send_with_retry(_do_send_card)
         except Exception as e:
             logger.error(f"[feishu] 卡片发送失败({e})，降级为文本")
             return self._send_reply_as_text(chat_id, text)
 
-    def _send_reply_as_text(self, chat_id: str, text: str) -> None:
-        """发送纯文本消息。"""
-        request = (
-            CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(chat_id)
-                .msg_type("text")
-                .content(json.dumps({"text": text}, ensure_ascii=False))
-                .build()
+    def _send_reply_as_text(self, chat_id: str, text: str) -> str | None:
+        """发送纯文本消息，失败时重试最多2次。"""
+        def _do_send():
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type("chat_id")
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .msg_type("text")
+                    .content(json.dumps({"text": text}, ensure_ascii=False))
+                    .build()
             )
             .build()
-        )
-        resp = self._lark_client.im.v1.message.create(request)
-        if not resp.success():
-            logger.error(f"[feishu] 发送消息失败: code={resp.code} msg={resp.msg}")
-            return None
-        else:
-            logger.info(f"[feishu] 消息发送成功 to={chat_id}")
+            )
+            resp = self._lark_client.im.v1.message.create(request)
+            if not resp.success():
+                raise ConnectionError(f"feishu api error: code={resp.code} msg={resp.msg}")
             return getattr(resp.data, "message_id", None)
+
+        try:
+            msg_id = self._send_with_retry(_do_send)
+            if msg_id:
+                logger.info(f"[feishu] 消息发送成功 to={chat_id}")
+            return msg_id
+        except Exception as e:
+            logger.error(f"[feishu] 文本消息发送最终失败: {e}")
+            return None
 
     def _send_text_sync(self, chat_id: str, text: str) -> None:
         """同步发送文本（在线程池中执行）。"""
         self._send_reply_as_text(chat_id, text)
 
     def _send_card_sync(self, chat_id: str, card: dict) -> None:
-        """同步发送卡片（在线程池中执行）。"""
-        try:
+        """同步发送卡片（在线程池中执行），失败时重试并降级为文本。"""
+        def _do_send():
             client = self._feishu_client
             client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
+
+        try:
+            self._send_with_retry(_do_send)
             logger.info(f"[feishu] 卡片发送成功 to={chat_id}")
         except Exception as e:
             logger.error(f"[feishu] 卡片发送失败: {e}，降级为文本")
@@ -268,14 +299,17 @@ class FeishuAdapter(BasePlatformAdapter):
         }
 
     def _send_progress_card(self, chat_id: str, lines: list[str], finished: bool = False) -> str | None:
-        """发送进度卡片，返回 message_id。失败时 fallback 到文本消息。"""
+        """发送进度卡片，返回 message_id。失败时重试并降级为文本消息。"""
         card = self._make_progress_card(lines, finished=finished)
         logger.info(f"[feishu] _send_progress_card: lines={len(lines)}, finished={finished}")
-        try:
+
+        def _do_send():
             client = self._feishu_client
             data = client.send_card(receive_id=chat_id, card=card, receive_id_type="chat_id")
-            logger.info(f"[feishu] progress card sent ok")
             return data.get("data", {}).get("message_id")
+
+        try:
+            return self._send_with_retry(_do_send)
         except Exception as e:
             resp_body = getattr(getattr(e, "response", None), "text", "N/A")
             logger.error(f"[feishu] 发送进度卡片失败: {e}\n  response: {resp_body[:500]}")
@@ -285,7 +319,9 @@ class FeishuAdapter(BasePlatformAdapter):
                 text_lines = [f"[Lamix 工作进度 - {status} ({len(lines)} 个工具调用)]"]
                 for line in lines[-10:]:
                     text_lines.append(line[:150])
-                client.send_text(receive_id=chat_id, text="\n".join(text_lines), receive_id_type="chat_id")
+                self._send_with_retry(
+                    lambda: client.send_text(receive_id=chat_id, text="\n".join(text_lines), receive_id_type="chat_id")
+                )
             except Exception as e2:
                 logger.error(f"[feishu] 进度文本 fallback 也失败: {e2}")
             return None
