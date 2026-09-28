@@ -87,6 +87,124 @@ class MessageDeduplicator:
             self._seen[message_id] = time.monotonic()
 
 
+# ── 飞书卡片（interactive）解析 ──────────────────────────────────────────────
+
+# 低版本客户端收不到卡片时，服务端降级下发的占位文本（不应进入对话上下文）
+_PLACEHOLDER_TEXTS = (
+    "请升级至最新版本客户端，以查看内容",
+)
+
+
+def _is_placeholder_text(text: str) -> bool:
+    return any(p in text for p in _PLACEHOLDER_TEXTS)
+
+
+def _extract_elements_text(elements) -> list[str]:
+    """从卡片元素列表递归提取可见文本片段。
+
+    支持 schema 2.0（markdown / column_set / action / note / div.fields）
+    与旧版（text / a / at 平铺或嵌套 list）；hr / img 跳过；占位文本过滤。
+    """
+    if not isinstance(elements, list):
+        return []
+    parts: list[str] = []
+
+    def _emit(text) -> None:
+        if not isinstance(text, str):
+            return
+        text = text.strip()
+        if text and not _is_placeholder_text(text):
+            parts.append(text)
+
+    def _title_of(node: dict) -> None:
+        """提取 plain_text / lark_md 风格的 title/text dict 中的内容。"""
+        content = node.get("content") or node.get("text")
+        _emit(content if isinstance(content, str) else "")
+
+    def _walk(node) -> None:
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        tag = node.get("tag", "")
+
+        if tag in ("hr", "img", "image", "chart", "iframe"):
+            return  # 无文本元素
+        if tag == "markdown":
+            _emit(node.get("content", ""))
+        elif tag in ("text", "a"):
+            _emit(node.get("text", ""))
+        elif tag == "plain_text" or tag == "lark_md":
+            _title_of(node)
+        elif tag == "at":
+            name = node.get("user_name") or node.get("user_id") or ""
+            if name:
+                parts.append(f"@{name}")
+        elif tag == "button":
+            btn_text = node.get("text")
+            if isinstance(btn_text, dict):
+                _emit(btn_text.get("content", "") or btn_text.get("text", ""))
+            else:
+                _emit(btn_text)
+        elif tag == "column_set":
+            for col in node.get("columns") or []:
+                _walk(col.get("elements") if isinstance(col, dict) else None)
+        elif tag == "column":
+            _walk(node.get("elements"))
+        elif tag == "action":
+            _walk(node.get("actions"))
+        elif tag == "note":
+            _walk(node.get("elements"))
+        elif tag == "div":
+            _walk(node.get("fields"))
+            text_node = node.get("text")
+            if isinstance(text_node, dict):
+                _title_of(text_node)
+        else:
+            # 未知 tag：兜底提取常见文本字段
+            _emit(node.get("content") or node.get("text"))
+
+    _walk(elements)
+    return parts
+
+
+def _extract_card_text(obj) -> str | None:
+    """解析飞书卡片对象，返回可见纯文本；非卡片 dict 返回 None。
+
+    兼容 schema 2.0（header + body.elements）与旧版（title + elements）。
+    整卡只有占位文本时返回空字符串。
+    """
+    if not isinstance(obj, dict):
+        return None
+    if not any(k in obj for k in ("schema", "header", "body", "elements", "config")):
+        return None
+
+    parts: list[str] = []
+
+    # 标题：schema 2.0 的 header.title / 旧版顶层 title
+    header = obj.get("header")
+    title = obj.get("title")
+    for t in (title, header.get("title") if isinstance(header, dict) else None):
+        if isinstance(t, str):
+            if t.strip() and not _is_placeholder_text(t):
+                parts.append(t.strip())
+        elif isinstance(t, dict):
+            content = t.get("content") or t.get("text")
+            if isinstance(content, str) and content.strip() and not _is_placeholder_text(content):
+                parts.append(content.strip())
+
+    # 正文：schema 2.0 的 body.elements / 旧版顶层 elements
+    body = obj.get("body")
+    if isinstance(body, dict):
+        parts.extend(_extract_elements_text(body.get("elements") or []))
+    if "elements" in obj:
+        parts.extend(_extract_elements_text(obj.get("elements")))
+
+    return "\n".join(parts)
+
+
 class FeishuAdapter(BasePlatformAdapter):
     """飞书平台适配器：通过 WebSocket 长连接接收消息。"""
 
@@ -499,6 +617,11 @@ class FeishuAdapter(BasePlatformAdapter):
                             if isinstance(elem, dict):
                                 parts.append(elem.get("text", ""))
                 return " ".join(parts).strip()
+
+        # interactive 卡片类型
+        card_text = _extract_card_text(obj)
+        if card_text is not None:
+            return card_text
 
         return ""
 
