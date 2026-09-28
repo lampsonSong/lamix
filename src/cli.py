@@ -162,9 +162,13 @@ def _run_repl(config: dict) -> None:
     
     # 创建补全器
     completer = LamixCompleter(history=history_content)
-    # Ctrl+C 中断回调
+    # Ctrl+C 中断回调：打断正在执行的 agent 任务（输入框保留）
+    from src.cli_ui.async_runner import AsyncInputRunner
+    runner = AsyncInputRunner()
+
     def _on_ctrl_c():
         _set_interrupt()
+        runner.request_interrupt(session)
     
     key_bindings = create_key_bindings(interrupt_callback=_on_ctrl_c)
     
@@ -182,90 +186,110 @@ def _run_repl(config: dict) -> None:
         reserve_space_for_menu=8,
     )
 
+    # worker 线程内的结果渲染（patch_stdout 保护下打印安全）
+    def _render_result(result) -> None:
+        if result is None:
+            return
+        if getattr(result, "is_exit", False) or getattr(result, "is_new", False):
+            return  # 标志由主线程处理
+        reply = getattr(result, "reply", "") or ""
+        if reply:
+            if getattr(result, "is_command", False):
+                print_command(reply)
+            else:
+                print_bot(reply)
+        if getattr(result, "compaction_msg", ""):
+            print_info(result.compaction_msg)
+
+    # 计划确认执行后的压缩收尾（worker 线程内）
+    def _post_confirm_compact() -> None:
+        cr = session.agent.maybe_compact(
+            session_store=session_store,
+            session_id=session.session_id or "",
+            progress_callback=_cli_partial_sender,
+        )
+        if cr is not None:
+            if cr.success:
+                print_success(
+                    f"上下文压缩完成：归档 {cr.archived_count} 条内容，"
+                    f"{cr.tokens_before} → {cr.tokens_after} token"
+                )
+            else:
+                print_error(f"上下文压缩失败: {cr.error}")
+
+    from prompt_toolkit.patch_stdout import patch_stdout
+
     try:
-        while True:
-            _clear_interrupt()
-            try:
-                user_input = prompt_session.prompt(
-                    [("class:prompt", "you> ")],
-                ).strip()
-            except (KeyboardInterrupt, EOFError):
-                break
+        with patch_stdout(raw=True):
+            while True:
+                _clear_interrupt()
 
-            if _check_interrupt():
-                break
-            if not user_input:
-                continue
+                # worker 设置的主线程标志
+                if runner.exit_requested:
+                    break
+                if runner.needs_reset:
+                    runner.needs_reset = False
+                    # 通过 SessionManager 统一重置
+                    session = mgr.reset_session("cli", "default")
+                    session.agent.progress_callback = _cli_progress_callback
+                    session.partial_sender = _cli_partial_sender
+                    print_divider()
+                    print_info("新 session 已开始")
+                    print_divider()
+                    print()
+                    continue
 
-            # 打印用户输入（带样式）
-            from src.cli_ui.styled import console
-            console.print(f"[{C.USER_INPUT}]{user_input}[/{C.USER_INPUT}]")
+                try:
+                    user_input = prompt_session.prompt(
+                        [("class:prompt", "you> ")],
+                    ).strip()
+                except (KeyboardInterrupt, EOFError):
+                    break
 
-            result = session.handle_input(user_input)
+                if _check_interrupt():
+                    # Ctrl+C 已在回调里打断任务；此处仅决定是否退出 REPL
+                    if runner.busy():
+                        continue
+                    break
+                if not user_input:
+                    continue
 
-            if result.is_exit or _check_interrupt():
-                break
+                # 打印用户输入（带样式）
+                from src.cli_ui.styled import console
+                console.print(f"[{C.USER_INPUT}]{user_input}[/{C.USER_INPUT}]")
 
-            if result.is_new:
-                # 通过 SessionManager 统一重置
-                session = mgr.reset_session("cli", "default")
-                session.agent.progress_callback = _cli_progress_callback
-                session.partial_sender = _cli_partial_sender
-                print_divider()
-                print_info("新 session 已开始")
-                print_divider()
-                print()
-                continue
-
-            if result.reply:
-                if result.is_command:
-                    print_command(result.reply)
-                else:
-                    print_bot(result.reply)
-
-                # 计划待确认时由用户选择是否执行
-                if (
-                    not result.is_command
-                    and result.reply
-                    and "请确认是否执行此计划" in result.reply
-                ):
-                    try:
-                        confirm_input = prompt_session.prompt(
-                            [("class:prompt", "确认执行？(y/n): ")],
-                        ).strip().lower()
-                    except (KeyboardInterrupt, EOFError):
-                        confirm_input = "n"
-                    if confirm_input in ("y", "yes", "是"):
-                        exec_result = session.agent.confirm_and_execute()
-                        if exec_result:
-                            print()
-                            print_bot(exec_result)
+                # 有任务在跑：打断当前任务再处理新输入
+                if runner.busy():
+                    print_info("⚡ 收到新输入，正在中断当前任务…")
+                    runner.request_interrupt(session)
+                    if runner.wait_done(timeout=30):
+                        print_info("当前任务已中断")
                     else:
-                        cancel_result = session.agent.cancel_plan()
-                        print_info(f"已取消: {cancel_result}")
-                    
-                    # 与 handle_input 一致：确认/取消后的回合也尝试压缩
-                    try:
-                        cr = session.agent.maybe_compact(
-                            session_store=session_store,
-                            session_id=session.session_id or "",
-                            progress_callback=_cli_partial_sender,
-                        )
-                        if cr is not None:
-                            if cr.success:
-                                print_success(
-                                    f"上下文压缩完成：归档 {cr.archived_count} 条内容，"
-                                    f"{cr.tokens_before} → {cr.tokens_after} token"
-                                )
-                            else:
-                                print_error(f"上下文压缩失败: {cr.error}")
-                    except Exception:
-                        pass
+                        print_error("当前任务未能及时中断，本条输入已忽略")
+                        continue
 
-            if result.compaction_msg:
-                print_info(result.compaction_msg)
+                # 计划待确认：y 执行 / n 取消 / 其他输入视为放弃确认的新消息
+                if runner.pending_confirm:
+                    low = user_input.lower()
+                    if low in ("y", "yes", "是"):
+                        runner.pending_confirm = False
+                        runner.submit_confirm(
+                            session, _render_result, after=_post_confirm_compact
+                        )
+                        continue
+                    runner.pending_confirm = False
+                    cancel_result = session.agent.cancel_plan()
+                    print_info(f"已取消待确认计划: {cancel_result}")
+
+                # 普通输入 → worker 线程执行，主线程立即回到输入框
+                if not runner.submit(session, user_input, _render_result):
+                    print_error("任务提交失败（已有任务在跑）")
 
     finally:
+        # 退出前等待 worker 线程结束，避免 cleanup 与执行中任务竞争
+        if runner.busy():
+            runner.request_interrupt(session)
+            runner.wait_done(timeout=10)
         print_divider()
         print_info("正在清理会话...")
         session.cleanup()
