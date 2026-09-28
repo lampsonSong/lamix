@@ -190,3 +190,61 @@ class TestConfirm:
         assert runner.submit_confirm(session, None) is False
         block.set()
         runner.wait_done(timeout=5)
+
+
+class TestStateChangeCallback:
+    """on_state_change 回调：worker 启动/结束时各触发一次，异常被吞掉。"""
+
+    def test_callback_on_start_and_finish(self):
+        block = threading.Event()
+        calls = []
+
+        def handle(user_input):
+            block.wait(timeout=10)
+            return SimpleNamespace(reply="slow", is_command=False,
+                                   is_exit=False, is_new=False, compaction_msg="")
+
+        session = _fake_session(handle)
+        runner = AsyncInputRunner()
+        runner.on_state_change = lambda: calls.append(runner.busy())
+        assert runner.submit(session, "task", None) is True
+        # 启动通知：此时 worker 存活，busy=True
+        assert calls, "启动时未触发回调"
+        assert calls[0] is True
+        block.set()
+        assert runner.wait_done(timeout=5) is True
+        # 结束通知：busy=False
+        assert calls[-1] is False
+        assert len(calls) >= 2
+
+    def test_callback_exception_swallowed(self):
+        def bad_callback():
+            raise RuntimeError("callback boom")
+
+        session = _fake_session()
+        runner = AsyncInputRunner()
+        runner.on_state_change = bad_callback
+        assert runner.submit(session, "x", None) is True
+        assert runner.wait_done(timeout=5) is True
+        # 回调异常不影响 worker 结果
+        assert runner.last_error is None
+        assert runner.last_result.reply == "echo:x"
+
+    def test_submit_confirm_callback(self):
+        block = threading.Event()
+        calls = []
+
+        def confirm_impl():
+            block.wait(timeout=10)
+            return "计划执行完成"
+
+        session = _fake_session()
+        session.agent.confirm_and_execute = Mock(side_effect=confirm_impl)
+        runner = AsyncInputRunner()
+        runner.on_state_change = lambda: calls.append(runner.busy())
+        assert runner.submit_confirm(session, None) is True
+        assert calls and calls[0] is True
+        block.set()
+        assert runner.wait_done(timeout=5) is True
+        assert calls[-1] is False
+        assert len(calls) >= 2

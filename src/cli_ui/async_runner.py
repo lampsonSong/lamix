@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from types import SimpleNamespace
+from typing import Callable
 
 
 class AsyncInputRunner:
@@ -20,6 +21,7 @@ class AsyncInputRunner:
 
     def __init__(self) -> None:
         self._worker: threading.Thread | None = None
+        self._busy = False  # 显式忙标志：start 前置 True，worker finally 清 False
         self._lock = threading.Lock()
         self.last_result = None
         self.last_error: Exception | None = None
@@ -27,12 +29,24 @@ class AsyncInputRunner:
         self.pending_confirm = False   # agent 输出计划等待 y/n 确认
         self.needs_reset = False       # /new：主线程需 reset session
         self.exit_requested = False    # /exit：主线程需退出 REPL
+        # 状态变更回调：worker 启动后与结束时各调用一次（用于刷新提示符等）
+        self.on_state_change: Callable[[], None] | None = None
 
     # ── 状态查询 ──────────────────────────────────────────────────────────
 
     def busy(self) -> bool:
-        """是否有任务正在 worker 线程执行。"""
-        return self._worker is not None and self._worker.is_alive()
+        """是否有任务正在执行（显式标志，结束通知时线程可能尚未完全退出）。"""
+        return self._busy
+
+    def _notify_state_change(self) -> None:
+        """通知状态变更（worker 启动/结束）；回调异常不影响 worker。"""
+        cb = self.on_state_change
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            pass
 
     # ── 任务提交 ──────────────────────────────────────────────────────────
 
@@ -53,26 +67,32 @@ class AsyncInputRunner:
 
         def _work() -> None:
             try:
-                result = session.handle_input(user_input)
-                with self._lock:
-                    self.last_result = result
-                    self.last_error = None
-                self._apply_flags(result)
-                if render is not None:
-                    render(result)
-            except Exception as e:  # noqa: BLE001 - worker 兜底，不能让线程静默死掉
-                with self._lock:
-                    self.last_error = e
                 try:
-                    from src.cli_ui.styled import print_error
-                    print_error(f"[worker] 任务异常: {e}")
-                except Exception:
-                    pass
+                    result = session.handle_input(user_input)
+                    with self._lock:
+                        self.last_result = result
+                        self.last_error = None
+                    self._apply_flags(result)
+                    if render is not None:
+                        render(result)
+                except Exception as e:  # noqa: BLE001 - worker 兜底，不能让线程静默死掉
+                    with self._lock:
+                        self.last_error = e
+                    try:
+                        from src.cli_ui.styled import print_error
+                        print_error(f"[worker] 任务异常: {e}")
+                    except Exception:
+                        pass
+            finally:
+                self._busy = False
+                self._notify_state_change()
 
         self._worker = threading.Thread(
             target=_work, daemon=True, name="cli-input-worker"
         )
+        self._busy = True
         self._worker.start()
+        self._notify_state_change()
         return True
 
     def submit_confirm(self, session, render, after=None) -> bool:
@@ -86,30 +106,36 @@ class AsyncInputRunner:
 
         def _work() -> None:
             try:
-                exec_result = session.agent.confirm_and_execute()
-                if exec_result:
-                    pseudo = SimpleNamespace(
-                        reply=exec_result, is_command=False,
-                        is_exit=False, is_new=False, compaction_msg="",
-                    )
-                    if render is not None:
-                        render(pseudo)
-                if after is not None:
+                try:
+                    exec_result = session.agent.confirm_and_execute()
+                    if exec_result:
+                        pseudo = SimpleNamespace(
+                            reply=exec_result, is_command=False,
+                            is_exit=False, is_new=False, compaction_msg="",
+                        )
+                        if render is not None:
+                            render(pseudo)
+                    if after is not None:
+                        try:
+                            after()
+                        except Exception:
+                            pass
+                except Exception as e:  # noqa: BLE001
                     try:
-                        after()
+                        from src.cli_ui.styled import print_error
+                        print_error(f"[worker] 计划执行异常: {e}")
                     except Exception:
                         pass
-            except Exception as e:  # noqa: BLE001
-                try:
-                    from src.cli_ui.styled import print_error
-                    print_error(f"[worker] 计划执行异常: {e}")
-                except Exception:
-                    pass
+            finally:
+                self._busy = False
+                self._notify_state_change()
 
         self._worker = threading.Thread(
             target=_work, daemon=True, name="cli-confirm-worker"
         )
+        self._busy = True
         self._worker.start()
+        self._notify_state_change()
         return True
 
     # ── 打断 ──────────────────────────────────────────────────────────────

@@ -59,6 +59,7 @@ from src.cli_ui.completion import LamixCompleter, create_key_bindings
 
 PROMPT_STYLE = Style.from_dict({
     "prompt": "ansigreen bold",
+    "prompt.busy": "ansiyellow bold",
     "command": "ansigreen",
 })
 
@@ -166,6 +167,12 @@ def _run_repl(config: dict) -> None:
     from src.cli_ui.async_runner import AsyncInputRunner
     runner = AsyncInputRunner()
 
+    # 提示符随任务状态切换：处理中显示黄色 ⏳ 标志（message 支持 callable，每次渲染求值）
+    def _prompt_message():
+        if runner.busy():
+            return [("class:prompt.busy", "you ⏳ 处理中> ")]
+        return [("class:prompt", "you> ")]
+
     def _on_ctrl_c():
         _set_interrupt()
         runner.request_interrupt(session)
@@ -185,6 +192,17 @@ def _run_repl(config: dict) -> None:
         complete_while_typing=True,
         reserve_space_for_menu=8,
     )
+
+    # 任务状态变更时重绘输入框（app.invalidate() 线程安全），提示符实时切换
+    def _on_busy_state_change():
+        try:
+            app = prompt_session.app
+            if app is not None and app.is_running:
+                app.invalidate()
+        except Exception:
+            pass
+
+    runner.on_state_change = _on_busy_state_change
 
     # worker 线程内的结果渲染（patch_stdout 保护下打印安全）
     def _render_result(result) -> None:
@@ -241,7 +259,7 @@ def _run_repl(config: dict) -> None:
 
                 try:
                     user_input = prompt_session.prompt(
-                        [("class:prompt", "you> ")],
+                        _prompt_message,
                     ).strip()
                 except (KeyboardInterrupt, EOFError):
                     break
