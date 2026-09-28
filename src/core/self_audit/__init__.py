@@ -10,7 +10,7 @@
     - Skill Scripts：语法错误、危险 import、TOOL_SCHEMA/TOOL_RUNNER 配置不完整
 """
 
-from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR
+from src.core.config import INFO_DIR, LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR
 from src.core.self_audit.lifecycle import (
     _LAST_ACTIVE_FILE,
     _get_last_active_date,
@@ -26,7 +26,9 @@ from src.core.self_audit.models import (
     AuditReport,
     _audit_log,
 )
+from src.core.self_audit.repair import build_repair_prompt, is_memory_finding
 from src.core.self_audit.scanners import (
+    scan_infos,
     scan_projects,
     scan_skill_overlap,
     scan_skill_scripts,
@@ -46,6 +48,7 @@ __all__ = [
     "AUDIT_LOG_DIR",
     "AUDIT_LOG_PATH",
     "AUDIT_REPORTS_DIR",
+    "INFO_DIR",
     "AuditFinding",
     "AuditReport",
     "LAMIX_DIR",
@@ -56,12 +59,15 @@ __all__ = [
     "_deserialize_report",
     "_get_last_active_date",
     "_serialize_report",
+    "build_repair_prompt",
     "cleanup_stale_knowledge",
     "format_report_detail",
+    "is_memory_finding",
     "list_reports",
     "load_report",
     "run_audit",
     "save_report",
+    "scan_infos",
     "scan_projects",
     "scan_skill_overlap",
     "scan_skill_scripts",

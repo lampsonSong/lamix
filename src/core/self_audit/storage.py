@@ -20,6 +20,7 @@ def _serialize_report(report: AuditReport) -> dict:
         "skills_scanned": report.skills_scanned,
         "projects_scanned": report.projects_scanned,
         "scripts_scanned": report.scripts_scanned,
+        "infos_scanned": report.infos_scanned,
         "findings": [
             {
                 "severity": f.severity,
@@ -55,6 +56,7 @@ def _deserialize_report(data: dict) -> AuditReport:
         skills_scanned=data.get("skills_scanned", 0),
         projects_scanned=data.get("projects_scanned", 0),
         scripts_scanned=data.get("scripts_scanned", 0),
+        infos_scanned=data.get("infos_scanned", 0),
         findings=findings,
     )
 

@@ -665,3 +665,105 @@ def scan_user_patterns(days: int = 1) -> list[AuditFinding]:
         ))
 
     return findings
+
+
+def scan_infos(auto_fix: bool = True) -> list[AuditFinding]:
+    """扫描 memory/info 层的知识文件，返回审计发现列表。
+
+    检查项：
+    - 首行缺标题（auto_fix 时自动补 "# 文件名"）
+    - 未闭合代码块（auto_fix 时文件末尾补 ```）
+    - 空文件
+    - 正文中的本地绝对路径已失效（/Users/... 不存在；/nas/ 等远程路径跳过）
+
+    注意：INFO_DIR 通过 self_audit 命名空间运行时解析（支持测试 patch）。
+    """
+    findings: list[AuditFinding] = []
+
+    from src.core import self_audit as _sa
+    info_dir = _sa.INFO_DIR
+    if not info_dir or not info_dir.exists():
+        return findings
+
+    for info_file in sorted(info_dir.glob("*.md")):
+        if ".archived" in info_file.parts or info_file.name.startswith("."):
+            continue
+        name = info_file.stem
+
+        try:
+            raw = info_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        # 空文件
+        if not raw.strip():
+            findings.append(AuditFinding(
+                severity="warning",
+                category="info",
+                target=name,
+                message="info 文件为空",
+                suggestion="补充内容或删除该文件",
+            ))
+            continue
+
+        # 首行缺标题
+        first_line = raw.lstrip().splitlines()[0].strip() if raw.lstrip() else ""
+        if not first_line.startswith("#"):
+            if auto_fix:
+                new_content = f"# {name}\n\n{raw}"
+                info_file.write_text(new_content, encoding="utf-8")
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message="info 文件缺少标题行",
+                    suggestion="首行补充 # 标题",
+                    fixed=True,
+                    fix_detail=f"已自动补充标题 # {name}",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message="info 文件缺少标题行",
+                    suggestion="首行补充 # 标题",
+                ))
+
+        # 未闭合代码块
+        fence_count = raw.count("```")
+        if fence_count % 2 == 1:
+            if auto_fix:
+                fixed_raw = raw.rstrip("\n") + "\n```"
+                info_file.write_text(fixed_raw, encoding="utf-8")
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message="info 文件存在未闭合的代码块",
+                    suggestion="补齐闭合的 ``` 标记",
+                    fixed=True,
+                    fix_detail="已在文件末尾自动补齐 ```",
+                ))
+            else:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message="info 文件存在未闭合的代码块",
+                    suggestion="补齐闭合的 ``` 标记",
+                ))
+
+        # 本地路径失效（/Users/ 开头且不存在；/nas/ 远程路径跳过）
+        for local_path in set(re.findall(r"/Users/[^\s`'\"\)\]]+", raw)):
+            from pathlib import Path as _P
+            if not _P(local_path.rstrip("。，；、")).exists():
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category="info",
+                    target=name,
+                    message=f"引用的本地路径已失效：{local_path}",
+                    suggestion="更新或移除失效路径",
+                ))
+
+    return findings

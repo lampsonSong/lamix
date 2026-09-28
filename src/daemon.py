@@ -110,6 +110,31 @@ def _check_restart_flag() -> tuple[int | None, bool]:
 # ── 任务回调 ────────────────────────────────────────────────────────────────
 
 
+def _run_llm_repair(report) -> str:
+    """审计报告的 LLM 自动修复闭环：记忆类未修复发现注入 session 执行修复。
+
+    返回追加到审计通知末尾的文本；无可修复项返回空字符串。
+    任何失败都不阻断审计通知本身（fail-soft）。
+    """
+    from src.core.self_audit import build_repair_prompt
+
+    prompt = build_repair_prompt(report.findings)
+    if not prompt:
+        return ""
+
+    try:
+        from src.core import task_scheduler
+        session = task_scheduler.get_session()
+        if session is None:
+            return "LLM 自动修复跳过：session 未设置（当前无活跃会话可注入）"
+        result = session.handle_input(prompt)
+        reply = getattr(result, "reply", "") or ""
+        return f"LLM 自动修复结果：\n{reply}"
+    except Exception as e:
+        logger.error(f"[self_audit] LLM 修复注入失败: {e}")
+        return f"LLM 修复注入失败：{e}"
+
+
 def _do_self_audit() -> None:
     """实际执行审计任务（在后台线程中运行）。"""
     from datetime import datetime
@@ -119,6 +144,9 @@ def _do_self_audit() -> None:
     try:
         report = run_audit()
         report_content = format_report_detail(report)
+        repair_section = _run_llm_repair(report)
+        if repair_section:
+            report_content = f"{report_content}\n\n{repair_section}"
         if len(report_content) > REPORT_MAX_LENGTH:
             report_content = report_content[:REPORT_MAX_LENGTH] + "\n\n...（报告过长已截断）"
         _audit_log("[self_audit] 审计完成，开始发送报告")

@@ -32,6 +32,11 @@ def set_session(session) -> None:
     get_scheduler().set_session(session)
 
 
+def get_session():
+    """获取当前 agent session 引用（未设置时返回 None）。"""
+    return get_scheduler().get_session()
+
+
 def schedule(config: TaskConfig) -> str:
     """注册任务，返回 task_id。"""
     return get_scheduler().schedule(config)

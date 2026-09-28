@@ -47,6 +47,7 @@ class AuditReport:
     skills_scanned: int = 0
     projects_scanned: int = 0
     scripts_scanned: int = 0
+    infos_scanned: int = 0
     findings: list[AuditFinding] = field(default_factory=list)
 
     @property
@@ -62,7 +63,7 @@ class AuditReport:
         warnings = len(self.findings_by_severity["warning"])
         lines = [
             f"审计时间：{self.timestamp}",
-            f"扫描范围：{self.skills_scanned} skills / {self.projects_scanned} projects / {self.scripts_scanned} scripts",
+            f"扫描范围：{self.skills_scanned} skills / {self.projects_scanned} projects / {self.scripts_scanned} scripts / {self.infos_scanned} infos",
             f"发现问题：{total} 条（error={errors}, warning={warnings}, info={total - errors - warnings}）",
         ]
         if total == 0:

@@ -36,6 +36,10 @@ class TaskScheduler:
         """设置 agent session 引用，供 prompt 模式任务使用。"""
         self._session = session
 
+    def get_session(self):
+        """返回当前 agent session 引用（未设置时为 None）。"""
+        return self._session
+
     def start(self) -> None:
         """启动调度器。daemon 启动时调用。"""
         self._scheduler.start()

@@ -9,6 +9,7 @@ from pathlib import Path
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR
 from src.core.self_audit.models import AuditFinding, AuditReport, logger
 from src.core.self_audit.scanners import (
+    scan_infos,
     scan_skills,
     scan_skill_overlap,
     scan_projects,
@@ -70,12 +71,15 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     ) if SKILLS_DIR.exists() else 0
     projects_count = len(list(PROJECTS_DIR.glob("*.md"))) if PROJECTS_DIR.exists() else 0
     scripts_count = len(list((SKILLS_DIR / "scripts").glob("*.py"))) if (SKILLS_DIR / "scripts").is_dir() else 0
+    from src.core import self_audit as _sa
+    infos_count = len(list(_sa.INFO_DIR.glob("*.md"))) if _sa.INFO_DIR.exists() else 0
 
     findings: list[AuditFinding] = []
     findings.extend(scan_skills(auto_fix=auto_fix))
     findings.extend(scan_skill_overlap())
     findings.extend(scan_projects(auto_fix=auto_fix))
     findings.extend(scan_skill_scripts(auto_fix=auto_fix))
+    findings.extend(scan_infos(auto_fix=auto_fix))
     findings.extend(scan_user_patterns())
     findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
@@ -87,6 +91,7 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
         skills_scanned=skills_count,
         projects_scanned=projects_count,
         scripts_scanned=scripts_count,
+        infos_scanned=infos_count,
         findings=findings,
     )
     return report
