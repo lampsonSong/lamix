@@ -100,6 +100,15 @@ class FeishuClient:
             resp = self._http.get(url, headers=self._headers(), **kw)
         return resp
 
+    def _patch_with_token_retry(self, url: str, **kw) -> "httpx.Response":
+        """PATCH 带 token 失效重试：失效 → 弃缓存重取 → 重试一次。"""
+        resp = self._http.patch(url, headers=self._headers(), **kw)
+        if self._is_token_invalid(resp):
+            _logger.warning("token 被服务端吊销（%s），强制刷新重试", resp.json().get("code"))
+            self._invalidate_token()
+            resp = self._http.patch(url, headers=self._headers(), **kw)
+        return resp
+
     def send_message(
         self,
         receive_id: str,
@@ -177,7 +186,7 @@ class FeishuClient:
         card: dict[str, Any],
     ) -> dict[str, Any]:
         """更新已发送的卡片消息内容（飞书 PATCH API）。"""
-        resp = self._http.patch(
+        resp = self._patch_with_token_retry(
             f"{FEISHU_BASE}/im/v1/messages/{message_id}",
             json={"content": json.dumps(card, ensure_ascii=False)},
         )
