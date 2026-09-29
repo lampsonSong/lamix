@@ -244,6 +244,8 @@ class FeishuAdapter(BasePlatformAdapter):
             # 并向飞书回 500，导致日志刷 error 且事件被重推
             .register_p2_im_message_reaction_created_v1(lambda data: None)
             .register_p2_im_message_reaction_deleted_v1(lambda data: None)
+            # 消息已读事件：读 receipt 事件，不处理但要注册 no-op，防止日志刷屏
+            .register_p2_im_message_message_read_v1(lambda data: None)
             .build()
         )
         self._ws_client = lark.ws.Client(
@@ -295,8 +297,8 @@ class FeishuAdapter(BasePlatformAdapter):
         text = re.sub(r'<think>[\s\S]*?</think>', '', text)
         return text.strip()
 
-    def _send_with_retry(self, send_fn, *args, max_retries: int = 2, retry_interval: float = 1.5, **kwargs):
-        """带重试的发送包装器。send_fn 返回 (success, result) 或直接抛出异常。
+    def _send_with_retry(self, send_fn, *args, max_retries: int = 2, base_interval: float = 1.5, **kwargs):
+        """带指数退避重试的发送包装器。send_fn 返回结果或直接抛出异常。
 
         仅对网络传输类错误（ConnectionResetError/ConnectionAbortedError/OSError）重试；
         FeishuAPIError 等 API 业务错误为确定性失败，直接抛出不重试。
@@ -312,8 +314,9 @@ class FeishuAdapter(BasePlatformAdapter):
             except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
                 last_err = e
                 if attempt < max_retries:
-                    logger.warning(f"[feishu] 发送失败(attempt {attempt + 1}/{max_retries + 1}), {e}，{retry_interval}s 后重试...")
-                    time.sleep(retry_interval)
+                    interval = base_interval * (2 ** attempt)
+                    logger.warning(f"[feishu] 发送失败(attempt {attempt + 1}/{max_retries + 1}), {e}，{interval:.1f}s 后重试...")
+                    time.sleep(interval)
                 # 其他异常不重试，直接抛出
             except Exception:
                 raise

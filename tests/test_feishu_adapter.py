@@ -155,11 +155,13 @@ class TestSendWithRetry:
             raise ConnectionResetError(54, "Connection reset by peer")
 
         with patch("src.platforms.adapters.feishu.time.sleep") as mock_sleep:
-            result = adapter._send_with_retry(flaky, max_retries=2, retry_interval=0)
+            result = adapter._send_with_retry(flaky, max_retries=2)  # 默认 base_interval=1.5
 
         assert result is None
         assert len(calls) == 3  # 1 次初始 + 2 次重试
         assert mock_sleep.call_count == 2
+        # 指数退避：base_interval * 2^attempt → 1.5 * 2^0=1.5, 1.5 * 2^1=3.0
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [1.5, 3.0]
 
     def test_api_error_no_retry(self):
         """FeishuAPIError 业务错误立即抛出，不 sleep 不重试"""
@@ -174,7 +176,7 @@ class TestSendWithRetry:
 
         with patch("src.platforms.adapters.feishu.time.sleep") as mock_sleep:
             with pytest.raises(FeishuAPIError):
-                adapter._send_with_retry(biz_error, max_retries=2, retry_interval=0)
+                adapter._send_with_retry(biz_error, max_retries=2, base_interval=0)
 
         assert len(calls) == 1  # 只调用 1 次，未重试
         assert mock_sleep.call_count == 0
