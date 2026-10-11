@@ -58,6 +58,7 @@ def _notify_user(text: str, config: dict | None = None) -> None:
     app_id = feishu_cfg.get("app_id", "").strip()
     app_secret = feishu_cfg.get("app_secret", "").strip()
     owner_chat_id = feishu_cfg.get("owner_chat_id", "").strip()
+    user_open_id = feishu_cfg.get("user_open_id", "").strip()
     if app_id and app_secret and owner_chat_id:
         try:
             from src.feishu.client import FeishuClient
@@ -66,6 +67,16 @@ def _notify_user(text: str, config: dict | None = None) -> None:
             return
         except Exception as e:
             logger.warning(f"[daemon] 飞书发送失败: {e}")
+    # 私聊兜底（2026-10-08）：owner_chat_id 缺失/失效时直发用户 open_id，
+    # 避免凌晨审计等无 session 场景静默降级到 print（TASK-feishu-rebind 待办）
+    if app_id and app_secret and user_open_id:
+        try:
+            from src.feishu.client import FeishuClient
+            client = FeishuClient(app_id=app_id, app_secret=app_secret)
+            client.send_message(receive_id=user_open_id, text=text, receive_id_type="open_id")
+            return
+        except Exception as e:
+            logger.warning(f"[daemon] 飞书私聊兜底发送失败: {e}")
     print(f"[daemon] {text}", flush=True)
 
 

@@ -90,6 +90,10 @@ SCHEDULE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "任务描述（显示在 list 中）",
                 },
+                "max_fires": {
+                    "type": "integer",
+                    "description": "触发次数上限，0=无限制；>0 时触发 N 次后自动取消（cron-monitor-lifecycle skill，2026-10-11 新增）",
+                },
             },
             "required": ["action"],
         },
@@ -154,6 +158,7 @@ def run_schedule(params: dict[str, Any]) -> str:
     func_name = params.get("func_name", "run").strip()
     func_args = params.get("func_args", {})
     description = params.get("description", "")
+    max_fires = int(params.get("max_fires", 0) or 0)
 
     if not task_id:
         return "[错误] task_id 不能为空"
@@ -172,6 +177,7 @@ def run_schedule(params: dict[str, Any]) -> str:
         "task_type": task_type,
         "func_args": func_args,
         "description": description,
+        "max_fires": max_fires,
     }
 
     # 确定执行方式：prompt 或 module（二选一）
@@ -218,7 +224,8 @@ def run_schedule(params: dict[str, Any]) -> str:
 
     try:
         schedule(config)
-        return f"✅ 定时任务已注册: {task_id} ({task_type_str})\n下次触发: 查看 task_list"
+        extra = f", max_fires={max_fires}" if max_fires else ""
+        return f"✅ 定时任务已注册: {task_id} ({task_type_str}{extra})\n下次触发: 查看 task_list"
     except Exception as e:
         return f"[错误] 注册失败: {e}\n{traceback.format_exc()}"
 
