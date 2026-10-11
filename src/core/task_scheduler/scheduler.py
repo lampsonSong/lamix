@@ -149,6 +149,10 @@ def _wrap_callback(config: TaskConfig, session) -> Callable:
                     config.on_done(result)
                 except Exception as e:
                     logger.warning(f"[task_scheduler] on_done 回调失败: {e}")
+            elif config.prompt and getattr(result, "reply", ""):
+                # on_done 未设置时：自动把 prompt 任务结果推送给用户
+                # 解决监控任务跑完无人告知的 bug（结果被 return 给 APScheduler 后丢弃）
+                _default_notify(config, result)
             return result
         except Exception as e:
             logger.error(
@@ -163,3 +167,26 @@ def _wrap_callback(config: TaskConfig, session) -> Callable:
 
     wrapped.__name__ = config.func.__name__ if config.func else config.task_id
     return wrapped
+
+
+def _default_notify(config: TaskConfig, result: Any) -> None:
+    """on_done 未设置时，自动把 prompt 任务的 LLM 回复推送给用户。
+
+    复用 daemon_boot._notify_user 的 fallback 链：
+    1. session.partial_sender（活动飞书 session 优先）
+    2. 飞书直发（owner_chat_id / user_open_id）
+    3. print 兜底
+
+    推迟 import 避免启动顺序耦合。
+    """
+    reply = getattr(result, "reply", "")
+    if not reply:
+        return
+    text = f"[定时任务 {config.task_id}]\n\n{reply}"
+    try:
+        from src.daemon_boot import _notify_user
+        from src.core.config import load_config
+        _notify_user(text, config=load_config())
+        logger.info(f"[task_scheduler] 默认外发成功: {config.task_id}")
+    except Exception as e:
+        logger.warning(f"[task_scheduler] 默认外发失败 ({config.task_id}): {e}")

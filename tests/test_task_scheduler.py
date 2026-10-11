@@ -2,10 +2,10 @@
 
 import time
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.core.task_scheduler.triggers import TaskConfig, TaskType
-from src.core.task_scheduler.scheduler import TaskScheduler
+from src.core.task_scheduler.scheduler import TaskScheduler, _default_notify
 
 
 def _make_scheduler() -> TaskScheduler:
@@ -228,3 +228,184 @@ class TestPromptTask:
                 task_type=TaskType.INTERVAL,
                 interval_seconds=60,
             )
+
+
+class TestPromptTaskDefaultNotify:
+    """测试 prompt 模式 on_done 未设置时的默认外发（解决监控任务静默不报的 bug）。"""
+
+    def test_prompt_no_on_done_nonempty_reply_triggers_notify(self):
+        """prompt + 无 on_done + reply 非空 → 默认外发被触发。"""
+        from src.core.session_commands import HandleResult
+
+        s = _make_scheduler()
+        mock_session = MagicMock()
+        mock_session.handle_input.return_value = HandleResult(reply="训练已到第 100 步")
+        s.set_session(mock_session)
+
+        with patch("src.core.task_scheduler.scheduler._default_notify") as mock_notify:
+            config = TaskConfig(
+                task_id="test_auto_notify",
+                task_type=TaskType.DELAYED,
+                trigger_seconds=1,
+                prompt="检查训练进度",
+            )
+            s.schedule(config)
+            s.start()
+            time.sleep(2)
+            s.shutdown(wait=False)
+            mock_notify.assert_called_once()
+            args = mock_notify.call_args[0]
+            assert args[0].task_id == "test_auto_notify"
+            assert args[1].reply == "训练已到第 100 步"
+
+    def test_prompt_no_on_done_empty_reply_skips_notify(self):
+        """prompt + 无 on_done + reply 为空 → 默认外发不触发。"""
+        from src.core.session_commands import HandleResult
+
+        s = _make_scheduler()
+        mock_session = MagicMock()
+        mock_session.handle_input.return_value = HandleResult(reply="")
+        s.set_session(mock_session)
+
+        with patch("src.core.task_scheduler.scheduler._default_notify") as mock_notify:
+            config = TaskConfig(
+                task_id="test_no_notify_empty",
+                task_type=TaskType.DELAYED,
+                trigger_seconds=1,
+                prompt="安静任务",
+            )
+            s.schedule(config)
+            s.start()
+            time.sleep(2)
+            s.shutdown(wait=False)
+            mock_notify.assert_not_called()
+
+    def test_prompt_with_on_done_skips_default_notify(self):
+        """prompt + 有 on_done → 默认外发不触发（on_done 优先级最高）。"""
+        from src.core.session_commands import HandleResult
+
+        s = _make_scheduler()
+        mock_session = MagicMock()
+        mock_session.handle_input.return_value = HandleResult(reply="hello")
+        s.set_session(mock_session)
+        on_done = MagicMock()
+
+        with patch("src.core.task_scheduler.scheduler._default_notify") as mock_notify:
+            config = TaskConfig(
+                task_id="test_on_done_priority",
+                task_type=TaskType.DELAYED,
+                trigger_seconds=1,
+                prompt="测试 on_done 优先",
+                on_done=on_done,
+            )
+            s.schedule(config)
+            s.start()
+            time.sleep(2)
+            s.shutdown(wait=False)
+            on_done.assert_called_once()
+            mock_notify.assert_not_called()
+
+
+class TestDefaultNotifyDirect:
+    """直接测试 _default_notify 函数行为（不通过 scheduler 触发路径）。"""
+
+    def _make_config(self, task_id: str = "my_task") -> TaskConfig:
+        return TaskConfig(
+            task_id=task_id,
+            task_type=TaskType.DELAYED,
+            trigger_seconds=10,
+            prompt="test",
+        )
+
+    def test_default_notify_calls_notify_user_with_formatted_text(self):
+        """reply 非空时调用 daemon_boot._notify_user，文本格式：[定时任务 X]\\n\\n<reply>。"""
+        from src.core.session_commands import HandleResult
+
+        config = self._make_config("my_task")
+        result = HandleResult(reply="训练已到第 100 步")
+
+        with patch("src.daemon_boot._notify_user") as mock_notify, \
+             patch("src.core.config.load_config") as mock_load_config:
+            mock_load_config.return_value = {"feishu": {"app_id": "x", "app_secret": "y"}}
+            _default_notify(config, result)
+
+            mock_notify.assert_called_once()
+            text = mock_notify.call_args[0][0]
+            cfg = mock_notify.call_args.kwargs.get("config")
+            assert text == "[定时任务 my_task]\n\n训练已到第 100 步", f"text 不对: {text!r}"
+            assert cfg == {"feishu": {"app_id": "x", "app_secret": "y"}}, f"config 不对: {cfg!r}"
+
+    def test_default_notify_skips_when_reply_empty(self):
+        """reply 为空时（HandleResult 或 str 都没 reply 属性）不调用 _notify_user。"""
+        from src.core.session_commands import HandleResult
+
+        config = self._make_config("silent_task")
+
+        with patch("src.daemon_boot._notify_user") as mock_notify:
+            # HandleResult(reply="")
+            _default_notify(config, HandleResult(reply=""))
+            # 普通字符串（没有 reply 属性）
+            _default_notify(config, "plain string")
+            # None
+            _default_notify(config, None)
+            mock_notify.assert_not_called()
+
+    def test_default_notify_swallows_notify_user_exceptions(self):
+        """_notify_user 抛异常时 _default_notify 只 warn 不崩溃（防御性兜底）。"""
+        from src.core.session_commands import HandleResult
+
+        config = self._make_config("will_fail")
+        result = HandleResult(reply="hello")
+
+        # _notify_user 抛任意异常都不应传播
+        with patch("src.daemon_boot._notify_user", side_effect=RuntimeError("network down")):
+            # 不抛异常就算通过
+            _default_notify(config, result)
+
+    def test_default_notify_uses_real_load_config_when_not_patched(self):
+        """不 patch load_config 时，_default_notify 真的调 load_config()（链路完整性）。"""
+        from src.core.session_commands import HandleResult
+
+        config = self._make_config("real_config_test")
+        result = HandleResult(reply="check")
+
+        with patch("src.daemon_boot._notify_user") as mock_notify:
+            # load_config 真的跑（无 patch）—— 验证它存在且返回 dict
+            _default_notify(config, result)
+            mock_notify.assert_called_once()
+            # 第二个位置/关键字参数应该是 config dict
+            cfg = mock_notify.call_args.kwargs.get("config")
+            assert isinstance(cfg, dict), f"config 应该是 dict，实际: {type(cfg)}"
+
+
+class TestFullChainIntegration:
+    """完整链路集成测试：真实 scheduler + 真实 _default_notify + mock daemon_boot._notify_user。"""
+
+    def test_scheduler_prompt_triggers_default_notify_to_daemon_boot(self):
+        """完整链路：prompt 任务跑完 → _default_notify 真跑 → daemon_boot._notify_user 真收到。"""
+        from src.core.session_commands import HandleResult
+
+        s = _make_scheduler()
+        mock_session = MagicMock()
+        mock_session.handle_input.return_value = HandleResult(reply="训练进度正常")
+        s.set_session(mock_session)
+
+        # 不 patch _default_notify —— 让它真的跑
+        # 只 patch 最末端的 daemon_boot._notify_user 防止真发飞书
+        with patch("src.daemon_boot._notify_user") as mock_notify:
+            config = TaskConfig(
+                task_id="integration_test",
+                task_type=TaskType.DELAYED,
+                trigger_seconds=1,
+                prompt="监控训练进度",
+            )
+            s.schedule(config)
+            s.start()
+            time.sleep(2.5)
+            s.shutdown(wait=False)
+
+            mock_notify.assert_called_once()
+            text = mock_notify.call_args[0][0]
+            assert "integration_test" in text
+            assert "训练进度正常" in text
+            assert text.startswith("[定时任务 ")
