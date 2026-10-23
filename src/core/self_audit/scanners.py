@@ -313,6 +313,29 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
         except OSError:
             pass
 
+        # ── 体积红线 + 流水账检测（2026-10-23 用户定稿：project 记录=状态快照，非事件日志）──
+        try:
+            size_kb = project_md.stat().st_size / 1024
+        except OSError:
+            size_kb = 0.0
+        if size_kb > 20:
+            findings.append(AuditFinding(
+                severity="error",
+                category="project",
+                target=name,
+                message=f"文件 {size_kb:.0f}KB 超过 20KB 红线：project 记录应是状态快照而非流水账",
+                suggestion="备份旧版到 /tmp 后按固定骨架重写折叠（现状快照→环境配置→架构事实→铁律→进行中）",
+            ))
+        update_sections = len(re.findall(r"^##\s*(更新|update)\b", content, re.IGNORECASE | re.MULTILINE))
+        if update_sections > 10:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="project",
+                target=name,
+                message=f"检测到 {update_sections} 个『## 更新』式追加小节：流水账式记录，与状态快照定位相悖",
+                suggestion="把仍有价值的当前状态折叠进固定骨架板块，删除过程性小节（细节在 session 历史可查）",
+            ))
+
         code_blocks = re.findall(r"```", content)
         if len(code_blocks) % 2 != 0:
             if auto_fix:
