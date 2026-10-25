@@ -19,6 +19,23 @@ from src.core.constants import FEISHU_TOKEN_TTL as TOKEN_TTL
 _logger = logging.getLogger(__name__)
 
 
+# ── 汇报卡片发送时间戳（供回复去重判定用）────────────────────────────────
+# tool_feishu_send 每次成功发出 card 后更新；adapter 在推送最终回复前
+# 查询它，若"刚发过卡片 + 回复是短确认"则跳过自动推送，避免双发同内容。
+_last_card_sent_ts: float = 0.0
+
+
+def mark_card_sent() -> None:
+    """记录一次汇报卡片成功发送。"""
+    global _last_card_sent_ts
+    _last_card_sent_ts = time.monotonic()
+
+
+def card_recently_sent(window_seconds: float = 120.0) -> bool:
+    """近 window_seconds 秒内是否成功发过汇报卡片。"""
+    return (time.monotonic() - _last_card_sent_ts) < window_seconds
+
+
 class FeishuAPIError(RuntimeError):
     """飞书 API 业务错误（code != 0），确定性失败，不应触发网络重试。
 
@@ -410,6 +427,7 @@ def tool_feishu_send(params: dict[str, Any]) -> str:
                 return f"[错误] 不支持的 card_type: {card_type}，支持: form, md"
 
             client.send_card(receive_id=receive_id, card=card, receive_id_type=receive_id_type)
+            mark_card_sent()
             return f"卡片已发送给 {receive_id}：{title}"
 
         else:

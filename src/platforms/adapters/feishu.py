@@ -19,7 +19,7 @@ import json
 import queue
 import re
 
-from src.feishu.client import FeishuClient, FeishuAPIError
+from src.feishu.client import FeishuClient, FeishuAPIError, card_recently_sent
 import threading
 import time
 from typing import Any
@@ -322,6 +322,19 @@ class FeishuAdapter(BasePlatformAdapter):
                 raise
         logger.error(f"[feishu] 发送消息失败（重试 {max_retries} 次后仍失败）: {last_err}")
         return None
+
+    # 短确认回复判定：近 2 分钟内发过汇报卡片，且最终回复是"已发/详见卡片"类
+    # 指向性短句（≤60 字）→ 属于对卡片的重复确认，跳过自动推送防双发（2026-10-25）
+    _CARD_ACK_RE = re.compile(r"已发|已推送|详见|见上方|见卡片|汇报已发|卡片已发|状态已发|详情见|已在上")
+
+    @classmethod
+    def _is_card_ack_reply(cls, reply: str) -> bool:
+        """最终回复是否为对刚发卡片的短确认（是则跳过自动推送）。"""
+        if not card_recently_sent(120.0):
+            return False
+        if len(reply) > 60:
+            return False
+        return bool(cls._CARD_ACK_RE.search(reply))
 
     def _send_reply(self, chat_id: str, text: str) -> str | None:
         """发送最终回复，自动判断用卡片还是文本。返回回复消息的 message_id。"""
@@ -826,7 +839,11 @@ class FeishuAdapter(BasePlatformAdapter):
             self._remove_reaction(message_id, reaction_id or "")
             self._dedup.mark_processed(message_id)
             if reply:
-                reply_msg_id = self._send_reply(chat_id, reply)
+                if self._is_card_ack_reply(reply):
+                    logger.info(f"[feishu] 近期已发汇报卡片，短确认回复跳过自动推送: {reply[:40]}")
+                    reply_msg_id = None
+                else:
+                    reply_msg_id = self._send_reply(chat_id, reply)
                 # 多轮结束时（有 tool_calls）打一次 MUSCLE emoji
                 if reply_msg_id:
                     tool_calls = getattr(result, "tool_calls", None)

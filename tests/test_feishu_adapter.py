@@ -197,3 +197,63 @@ class TestSendWithRetry:
 
         assert result == "msg_id_123"
         assert mock_sleep.call_count == 0
+
+
+class TestCardAckDedup:
+    """汇报卡片后的短确认回复去重（防"卡片+纯文本"双发，2026-10-25）"""
+
+    def test_ack_reply_skipped_after_card(self):
+        """发过卡片 + 短确认回复 → 应跳过自动推送"""
+        from src.platforms.adapters.feishu import FeishuAdapter
+
+        with patch("src.platforms.adapters.feishu.card_recently_sent", return_value=True):
+            assert FeishuAdapter._is_card_ack_reply("已完成，详见上方卡片") is True
+            assert FeishuAdapter._is_card_ack_reply("状态已发群") is True
+            assert FeishuAdapter._is_card_ack_reply("汇报已发，等结果就行") is True
+
+    def test_long_reply_not_skipped(self):
+        """发过卡片但回复较长（真实内容）→ 照常推送"""
+        from src.platforms.adapters.feishu import FeishuAdapter
+
+        long_reply = "详见上方卡片。" + "补充说明" * 20
+        with patch("src.platforms.adapters.feishu.card_recently_sent", return_value=True):
+            assert FeishuAdapter._is_card_ack_reply(long_reply) is False
+
+    def test_short_reply_without_pointer_not_skipped(self):
+        """发过卡片但回复无指向语（如真问答收尾）→ 照常推送"""
+        from src.platforms.adapters.feishu import FeishuAdapter
+
+        with patch("src.platforms.adapters.feishu.card_recently_sent", return_value=True):
+            assert FeishuAdapter._is_card_ack_reply("好的我知道了") is False
+
+    def test_no_recent_card_not_skipped(self):
+        """没发过卡片 → 永不跳过（纯问答轮不受影响）"""
+        from src.platforms.adapters.feishu import FeishuAdapter
+
+        with patch("src.platforms.adapters.feishu.card_recently_sent", return_value=False):
+            assert FeishuAdapter._is_card_ack_reply("已发群") is False
+            assert FeishuAdapter._is_card_ack_reply("详见上方卡片") is False
+
+
+class TestCardSentMark:
+    """client 侧卡片时间戳标记"""
+
+    def test_mark_and_query(self):
+        """标记后查询为 True，且窗口过期后为 False"""
+        from src.feishu import client as feishu_client
+
+        feishu_client.mark_card_sent()
+        assert feishu_client.card_recently_sent(window_seconds=120.0) is True
+        # 极小窗口 = 立即过期
+        assert feishu_client.card_recently_sent(window_seconds=0.0) is False
+
+    def test_default_not_sent(self):
+        """从未发过卡片（默认时间戳 0）→ False"""
+        import src.feishu.client as feishu_client
+
+        old = feishu_client._last_card_sent_ts
+        try:
+            feishu_client._last_card_sent_ts = 0.0
+            assert feishu_client.card_recently_sent() is False
+        finally:
+            feishu_client._last_card_sent_ts = old
