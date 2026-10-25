@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.tools import memory_guard
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +70,23 @@ def file_read(path: str, offset: int = 0, limit: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def file_write(path: str, content: str) -> str:
+def file_write(path: str, content: str, force: bool = False) -> str:
     """写入文件，自动创建父目录。
 
     ~/.lamix/{info,projects,skills}/ 顶层写入会自动改写到 memory/ 子目录。
+
+    写入 ~/.lamix/memory/projects/ 下的项目记录时，先过 memory_guard 守卫：
+    projects 是「状态快照」不是事件日志，流水账式追加会被拒绝落盘（force=True
+    可显式豁免，会留日志）。详见 src/tools/memory_guard.py。
     """
     p = _redirect_legacy_lamix_path(_expand(path))
+    if not force:
+        violation = memory_guard.check_project_write(p, content)
+        if violation:
+            logger.warning("[fileops] project write rejected: %s", p)
+            return violation
+    elif memory_guard.is_project_target(p):
+        logger.warning("[fileops] project write FORCED (guard bypassed): %s", p)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -125,6 +138,11 @@ FILE_WRITE_SCHEMA: dict[str, Any] = {
                     "type": "string",
                     "description": "要写入的文本内容",
                 },
+                "force": {
+                    "type": "boolean",
+                    "description": "仅用于 projects 记录：跳过「状态快照非流水账」写入守卫（会留日志，慎用）",
+                    "default": False,
+                },
             },
             "required": ["path", "content"],
         },
@@ -145,6 +163,7 @@ def run_file_read(params: dict[str, Any]) -> str:
 def run_file_write(params: dict[str, Any]) -> str:
     path = params.get("path", "")
     content = params.get("content", "")
+    force = bool(params.get("force", False))
     if not path:
         return "[错误] path 参数不能为空"
-    return file_write(path, content)
+    return file_write(path, content, force=force)
