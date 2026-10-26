@@ -15,7 +15,7 @@ import json
 import os
 import subprocess
 
-from src.core.config import DEFAULT_CONFIG
+from src.core.config import DEFAULT_CONFIG, get_model_name
 import sys
 import tarfile
 import tempfile
@@ -179,7 +179,8 @@ def process_chat(text: str, llm_config: dict) -> str:
 
     api_key = llm_config.get("api_key", "")
     base_url = llm_config.get("base_url", DEFAULT_CONFIG["llm"]["base_url"])
-    model = llm_config.get("model", DEFAULT_CONFIG["llm"]["model"])
+    # 模型标识兼容 name（规范键）/ model（兼容别名）
+    model = get_model_name(llm_config, "llm") or DEFAULT_CONFIG["llm"]["name"]
 
     if not base_url:
         return "❌ LLM 未配置 base_url"

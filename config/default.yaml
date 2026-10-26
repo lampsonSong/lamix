@@ -4,7 +4,7 @@
 llm:
   api_key: ""                                        # DeepSeek API Key（必填）
   base_url: "https://api.deepseek.com/"              # LLM API 地址
-  model: "deepseek-v4-flash"                         # 模型名称
+  name: "deepseek-v4-flash"                          # 模型名称（也兼容写 model（别名），推荐统一用 name）
   context_window: 131072                           # 模型 context window（token 数），各模型不同，需按实际填写
 
 feishu:
@@ -26,7 +26,7 @@ skills_management:
 # 配置有效的 provider 启用语义检索；留空则降级为纯关键词搜索。
 embedding:
   provider: ""
-  model: ""
+  name: ""                                          # 也兼容写 model（别名），推荐统一用 name
   # base_url: ""                                          # 必须显式配置
   # api_key: ""                                           # 必须显式配置
 
@@ -35,7 +35,7 @@ embedding:
 # 注意：DeepSeek 不支持视觉模型，需使用其他 provider。
 # vision:
 #   api_key: ""
-#   model: "your-vision-model"
+#   name: "your-vision-model"                        # 也兼容写 model（别名），推荐统一用 name
 #   base_url: ""
 #   timeout: 60
 #   max_base64_length: 4000000

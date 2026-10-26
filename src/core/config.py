@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -31,8 +32,15 @@ _DEFAULT_RETRIEVAL: dict[str, Any] = {
 
 _DEFAULT_EMBEDDING: dict[str, Any] = {
     "provider": "",
-    "model": "",
+    "name": "",
 }
+
+# 模型标识字段：规范键是 "name"，"model" 作为兼容别名照收
+MODEL_NAME_KEY = "name"
+MODEL_ALIAS_KEY = "model"
+
+# 需要做 name/model 归一化的配置段
+_MODEL_SECTIONS = ("llm", "embedding", "vision")
 
 _DEFAULT_SKILLS_MANAGEMENT: dict[str, Any] = {
     "cleanup_max_skills": 300,
@@ -44,7 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "api_key": "",
         "base_url": "https://api.deepseek.com/",
-        "model": "deepseek-v4-flash",
+        "name": "deepseek-v4-flash",
     },
     "models": [],
     "feishu": {
@@ -260,6 +268,84 @@ def _migrate_old_dirs() -> None:
     _fix_config_paths()
 
 
+def get_model_name(
+    section: Any,
+    section_label: str = "config",
+    warn_on_conflict: bool = False,
+) -> str:
+    """从配置段中取模型标识。
+
+    规范键是 ``name``，``model`` 作为兼容别名照收：
+      - 只写 ``name`` → 用 ``name``
+      - 只写 ``model`` → 用 ``model``
+      - 两个都写且值不同 → 以 ``name`` 为准（可选打 WARNING）
+      - 两个都没有 → 返回空字符串（调用方应跳过该条目）
+
+    Args:
+        section: 配置段（dict）
+        section_label: 段名，用于日志（如 llm / models[0]）
+        warn_on_conflict: 是否在冲突时打 WARNING
+    """
+    if not isinstance(section, dict):
+        return ""
+    raw_name = section.get(MODEL_NAME_KEY)
+    raw_alias = section.get(MODEL_ALIAS_KEY)
+    name = raw_name.strip() if isinstance(raw_name, str) else ""
+    alias = raw_alias.strip() if isinstance(raw_alias, str) else ""
+    if name and alias and name != alias:
+        if warn_on_conflict:
+            logger.warning(
+                "配置段 %s 中 'name' (%s) 与 'model' (%s) 冲突，以 'name' 为准",
+                section_label,
+                name,
+                alias,
+            )
+    return name or alias
+
+
+def _normalize_model_fields(cfg: dict[str, Any]) -> dict[str, Any]:
+    """把 model/name 别名归一化为 name（就地修改并返回同一 dict）。
+
+    适用范围：llm 段、embedding 段、vision 段、models[] 列表元素。
+    归一化后：规范键 ``name`` 存在，别名键 ``model`` 被移除（写盘只落 name）。
+
+    语义约定：
+      - 同时存在 name 与 model 且值不同 → 以 name 为准并打 WARNING
+      - 只有 model → 提升为 name
+      - 显式写空值（name: "" / model: ""）→ 保留为空（表示“未配置”），不回落默认值
+      - 两个键都没有 → 不补键（models[] 条目在消费处被跳过并打 WARNING）
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+
+    for key in _MODEL_SECTIONS:
+        section = cfg.get(key)
+        if not isinstance(section, dict):
+            continue
+        _promote_alias(section, key)
+
+    models = cfg.get("models")
+    if isinstance(models, list):
+        for idx, entry in enumerate(models):
+            if not isinstance(entry, dict):
+                continue
+            _promote_alias(entry, f"models[{idx}]")
+
+    return cfg
+
+
+def _promote_alias(section: dict[str, Any], section_label: str) -> None:
+    """把单个配置段里的 ``model`` 别名提升为规范键 ``name``（就地修改）。"""
+    has_name = MODEL_NAME_KEY in section
+    has_alias = MODEL_ALIAS_KEY in section
+    if not has_name and not has_alias:
+        return
+    value = get_model_name(section, section_label, warn_on_conflict=True)
+    section.pop(MODEL_ALIAS_KEY, None)
+    # 有值或显式写过键（哪怕是空串）→ 写回规范键；两个键都没写则不补键
+    section[MODEL_NAME_KEY] = value
+
+
 def get_skills_management_config(config: dict[str, Any]) -> dict[str, int]:
     """合并 skills_management 段，供 SkillIndex 清理逻辑使用。"""
     sm = config.get("skills_management")
@@ -303,13 +389,17 @@ def get_embedding_config(config: dict[str, Any]) -> dict[str, str]:
     """
     合并 embedding 段。base_url 必须显式配置（不继承 llm 段），不配则 embedding 不可用。
     返回的 api_key 也必须显式在 embedding 段指定，否则为空（降级为 keyword matching）。
+
+    模型标识兼容 ``name``（规范键）与 ``model``（兼容别名），对外仍返回 ``model`` 键。
     """
     emb = config.get("embedding", {})
     if not isinstance(emb, dict):
         emb = {}
+    name = get_model_name(emb, "embedding")
     return {
         "provider": str(emb.get("provider", "")),
-        "model": str(emb.get("model", "")),
+        "model": name,
+        "name": name,
         "api_key": str(emb.get("api_key", "")),
     }
 
@@ -337,13 +427,22 @@ def load_config() -> dict[str, Any]:
     else:
         data = {}
 
+    if not isinstance(data, dict):
+        data = {}
+
+    # 先归一化用户原始配置（name 优先 / model 兼容别名），
+    # 再与默认值合并，避免默认 llm.name 覆盖用户写的 model。
+    data = _normalize_model_fields(data)
+
     # Merge with defaults (deep merge)
-    merged = _deep_merge(dict(DEFAULT_CONFIG), data)
-    return merged
+    merged = _deep_merge(copy.deepcopy(DEFAULT_CONFIG), data)
+    return _normalize_model_fields(merged)
 
 
 def save_config(config: dict[str, Any]) -> None:
     """保存配置到 config.yaml。保留注释。"""
+    # 写盘前归一化：落盘字段名统一为 name，不再产出 model 键
+    _normalize_model_fields(config)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
@@ -372,9 +471,9 @@ def setup_interactive() -> dict[str, Any]:
     if base_url:
         config["llm"]["base_url"] = base_url
 
-    model = input(f"模型 [默认: {_yellow(config['llm']['model'])}]：").strip()
+    model = input(f"模型 [默认: {_yellow(config['llm'].get('name', ''))}]：").strip()
     if model:
-        config["llm"]["model"] = model
+        config["llm"]["name"] = model
 
     # Feishu 配置
     print(f"\n{_cyan('[2/3] 飞书配置（可选）')}")
@@ -392,7 +491,7 @@ def setup_interactive() -> dict[str, Any]:
     if emb_provider:
         config["embedding"] = {
             "provider": emb_provider,
-            "model": input("模型名称：").strip(),
+            "name": input("模型名称：").strip(),
             "api_key": getpass("API Key："),
         }
 
@@ -426,12 +525,18 @@ def resolve_env_vars(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_llm_config(config: dict[str, Any]) -> dict[str, str]:
-    """从完整配置中提取 LLM 调用所需字段。"""
+    """从完整配置中提取 LLM 调用所需字段。
+
+    模型标识统一用 ``name``（``model`` 作为兼容别名）。为兼容下游调用方，
+    返回的 dict 仍保留 ``model`` 键（值来自归一化后的 name）。
+    """
     llm = config.get("llm", {})
+    if not isinstance(llm, dict):
+        llm = {}
     return {
         "api_key": os.environ.get("LLM_API_KEY") or llm.get("api_key", ""),
         "base_url": os.environ.get("LLM_BASE_URL") or llm.get("base_url", ""),
-        "model": os.environ.get("LLM_MODEL") or llm.get("model", ""),
+        "model": os.environ.get("LLM_MODEL") or get_model_name(llm, "llm"),
     }
 
 
@@ -490,6 +595,8 @@ def update_config_path(config: dict[str, Any], key: str, path: str) -> None:
     except Exception:
         data = {}
     data[key] = path
+    # 写盘前归一化：落盘字段名统一为 name
+    _normalize_model_fields(data)
     try:
         with CONFIG_PATH.open("w", encoding="utf-8") as f:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False)

@@ -492,7 +492,12 @@ class ProjectIndex:
         if embedding_config and embedding_config.get("api_key") and embedding_config.get("base_url"):
             self._embed_client = _EmbeddingClient(
                 provider=embedding_config["provider"],
-                model=embedding_config["model"],
+                # 兼容 name（规范键）/ model（兼容别名）
+                model=(
+                    embedding_config.get("name")
+                    or embedding_config.get("model")
+                    or ""
+                ),
                 api_key=embedding_config["api_key"],
                 base_url=embedding_config["base_url"],
             )

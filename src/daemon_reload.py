@@ -16,7 +16,7 @@ import logging
 import threading
 from typing import Any
 
-from src.core.config import LAMIX_DIR
+from src.core.config import LAMIX_DIR, get_model_name
 from src.core.session_manager import get_session_manager
 from src.daemon_state import _shutdown
 
@@ -227,7 +227,7 @@ def _reload_config(pm, mgr, old_config: dict, new_config: dict) -> None:
     llm_changed = (
         old_llm.get("api_key") != new_llm.get("api_key") or
         old_llm.get("base_url") != new_llm.get("base_url") or
-        old_llm.get("model") != new_llm.get("model") or
+        get_model_name(old_llm, "llm") != get_model_name(new_llm, "llm") or
         old_models != new_models
     )
 
@@ -264,42 +264,16 @@ def _reload_config(pm, mgr, old_config: dict, new_config: dict) -> None:
 
 def _reload_llm_clients(mgr, config: dict) -> None:
     """重建所有 session 的 LLM 客户端（主模型 + fallback）。"""
-    from src.core.session import _create_llm, _create_llm_from_model_config
-    from src.core.compaction import _build_compaction_config, resolve_context_window
+    # _build_compaction_config 定义在 src.core.session（不是 src.core.compaction）
+    from src.core.session import build_llm_clients, _build_compaction_config
 
-    primary_llm, primary_adapter = _create_llm(config, channel="cli")
-    primary_name = config["llm"]["model"]
-    primary_cw = resolve_context_window(
-        config["llm"]["model"],
-        explicit=config["llm"].get("context_window"),
-    )
-
-    llm_clients: dict[str, Any] = {
-        primary_name: {
-            "llm": primary_llm,
-            "adapter": primary_adapter,
-            "context_window": primary_cw,
-        }
-    }
-
-    primary_api_key = config["llm"].get("api_key", "")
-    primary_base_url = config["llm"].get("base_url", "")
-    for model_cfg in config.get("models", []):
-        name = model_cfg["name"]
-        if name not in llm_clients:
-            llm_i, adapter_i = _create_llm_from_model_config(
-                model_cfg,
-                fallback_api_key=primary_api_key,
-                fallback_base_url=primary_base_url,
-                channel="cli",
-            )
-            llm_clients[name] = {
-                "llm": llm_i,
-                "adapter": adapter_i,
-                "context_window": resolve_context_window(
-                    name, explicit=model_cfg.get("context_window")
-                ),
-            }
+    (
+        primary_llm,
+        primary_adapter,
+        primary_name,
+        primary_cw,
+        llm_clients,
+    ) = build_llm_clients(config, channel="cli")
 
     fallback_models: list[tuple[Any, Any]] = []
     for name, cw in llm_clients.items():

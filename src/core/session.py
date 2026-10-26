@@ -20,6 +20,7 @@ from src.core.config import (
     LAMIX_DIR,
     get_retrieval_config,
     get_embedding_config,
+    get_model_name,
     INDEX_DIR,
     SKILLS_DIR,
     PROJECTS_DIR,
@@ -270,41 +271,14 @@ class Session(SessionCommandsMixin):
 
         skills = skills_mgr.load_all_skills()
 
-        # 构建多模型客户端字典
-        llm_clients: dict[str, Any] = {}
-
-        # 先加入 config.llm（当前激活模型）
-        primary_llm, primary_adapter = _create_llm(config, channel=channel)
-        primary_name = config["llm"]["model"]
-        primary_cw = resolve_context_window(
-            config["llm"]["model"],
-            explicit=config["llm"].get("context_window"),
-        )
-        llm_clients[primary_name] = {
-            "llm": primary_llm,
-            "adapter": primary_adapter,
-            "context_window": primary_cw,
-        }
-
-        # 加入 config.models 列表中的模型（跳过已添加的主模型）
-        primary_api_key = config["llm"].get("api_key", "")
-        primary_base_url = config["llm"].get("base_url", "")
-        for model_cfg in config.get("models", []):
-            name = model_cfg["name"]
-            if name not in llm_clients:
-                llm_i, adapter_i = _create_llm_from_model_config(
-                    model_cfg,
-                    fallback_api_key=primary_api_key,
-                    fallback_base_url=primary_base_url,
-                    channel=channel,
-                )
-                llm_clients[name] = {
-                    "llm": llm_i,
-                    "adapter": adapter_i,
-                    "context_window": resolve_context_window(
-                        name, explicit=model_cfg.get("context_window")
-                    ),
-                }
+        # 构建多模型客户端字典（主模型 + models[] 回退模型）
+        (
+            primary_llm,
+            primary_adapter,
+            primary_name,
+            primary_cw,
+            llm_clients,
+        ) = build_llm_clients(config, channel=channel)
 
         # 构建 fallback_models（排除主模型，保留 llm_clients 中的顺序）
         fallback_models: list[tuple[LLMClient, BaseModelAdapter]] = []
@@ -1057,13 +1031,77 @@ def _install_default_memory() -> None:
             pass
 
 
+def build_llm_clients(
+    config: dict[str, Any],
+    channel: str = "cli",
+) -> tuple[LLMClient, BaseModelAdapter, str, int | None, dict[str, Any]]:
+    """根据配置构建 LLM 客户端集合。
+
+    规则：
+      - ``llm`` 段为主模型（模型标识兼容 ``name`` / ``model``）
+      - ``models[]`` 每条为一个备选/回退模型
+      - ``models[]`` 条目完全缺名（既无 ``name`` 也无 ``model``）时**跳过该条并打 WARNING**，
+        绝不抛 KeyError，其他模型仍可正常使用
+
+    Returns:
+        (primary_llm, primary_adapter, primary_name, primary_context_window, llm_clients)
+    """
+    llm_cfg = config.get("llm", {}) or {}
+    primary_llm, primary_adapter = _create_llm(config, channel=channel)
+    primary_name = get_model_name(llm_cfg, "llm")
+    primary_cw = resolve_context_window(
+        primary_name,
+        explicit=llm_cfg.get("context_window"),
+    )
+
+    llm_clients: dict[str, Any] = {
+        primary_name: {
+            "llm": primary_llm,
+            "adapter": primary_adapter,
+            "context_window": primary_cw,
+        }
+    }
+
+    primary_api_key = llm_cfg.get("api_key", "")
+    primary_base_url = llm_cfg.get("base_url", "")
+    for idx, model_cfg in enumerate(config.get("models", []) or []):
+        if not isinstance(model_cfg, dict):
+            logger.warning("[session] models[%d] 不是字典配置，已跳过", idx)
+            continue
+        name = get_model_name(model_cfg, f"models[{idx}]")
+        if not name:
+            # 条目完全缺名（既没有 name 也没有 model）→ 跳过，绝不抛 KeyError
+            logger.warning(
+                "[session] models[%d] 缺少模型标识（name/model），已跳过该条目",
+                idx,
+            )
+            continue
+        if name in llm_clients:
+            continue
+        llm_i, adapter_i = _create_llm_from_model_config(
+            model_cfg,
+            fallback_api_key=primary_api_key,
+            fallback_base_url=primary_base_url,
+            channel=channel,
+        )
+        llm_clients[name] = {
+            "llm": llm_i,
+            "adapter": adapter_i,
+            "context_window": resolve_context_window(
+                name, explicit=model_cfg.get("context_window")
+            ),
+        }
+
+    return primary_llm, primary_adapter, primary_name, primary_cw, llm_clients
+
+
 def _create_llm(config: dict[str, Any], channel: str = "cli") -> tuple[LLMClient, BaseModelAdapter]:
     """从配置创建 LLMClient 与对应 Adapter（使用 config.llm 部分）。"""
-    llm_cfg = config["llm"]
+    llm_cfg = config.get("llm", {}) or {}
     llm = LLMClient(
-        api_key=llm_cfg["api_key"],
-        base_url=llm_cfg["base_url"],
-        model=llm_cfg["model"],
+        api_key=llm_cfg.get("api_key", ""),
+        base_url=llm_cfg.get("base_url", ""),
+        model=get_model_name(llm_cfg, "llm"),
         channel=channel,
     )
     return llm, create_adapter(llm)
@@ -1078,14 +1116,17 @@ def _create_llm_from_model_config(
     """从单个模型的配置字典创建 LLMClient 与 Adapter。"""
     api_key = model_cfg.get("api_key", "") or fallback_api_key
     base_url = model_cfg.get("base_url", "") or fallback_base_url
+    name = get_model_name(model_cfg, "models[]")
+    if not name:
+        raise ValueError("模型配置缺少模型标识（name 或 model）")
     if not base_url:
         raise ValueError(
-            f"模型 {model_cfg.get('name', '?')} 缺少 base_url 配置"
+            f"模型 {name} 缺少 base_url 配置"
         )
     llm = LLMClient(
         api_key=api_key,
         base_url=base_url,
-        model=model_cfg["name"],
+        model=name,
         channel=channel,
     )
     return llm, create_adapter(llm)

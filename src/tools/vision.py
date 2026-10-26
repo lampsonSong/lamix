@@ -16,6 +16,8 @@ import httpx
 import yaml
 from PIL import Image
 
+from src.core.config import get_model_name
+
 
 def _load_vision_config() -> dict[str, Any]:
     """从 ~/.lamix/config.yaml 加载 vision 配置段。"""
@@ -27,7 +29,10 @@ def _load_vision_config() -> dict[str, Any]:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
-        return config.get("vision", {})
+        vision = config.get("vision", {})
+        if not isinstance(vision, dict):
+            return {}
+        return vision
     except Exception:
         return {}
 
@@ -38,10 +43,20 @@ def _get_config_value(key: str, default: Any) -> Any:
     return vision_config.get(key, default)
 
 
+def _get_model_name(default: Any = "") -> Any:
+    """获取 vision 模型标识。
+
+    规范键是 ``name``，``model`` 作为兼容别名照收（name 优先，冲突时以 name 为准）。
+    """
+    vision_config = _load_vision_config()
+    name = get_model_name(vision_config, "vision", warn_on_conflict=True)
+    return name or default
+
+
 # 从配置文件读取，提供合理默认值
 API_KEY = _get_config_value("api_key", "")
 API_URL = _get_config_value("base_url", "")
-MODEL = _get_config_value("model", "")
+MODEL = _get_model_name("")
 TIMEOUT = _get_config_value("timeout", 60)
 MAX_BASE64_LENGTH = _get_config_value("max_base64_length", 4_000_000)
 
@@ -112,7 +127,7 @@ def analyze_image(image_base64: str, prompt: str = "描述这张图片的内容"
             "请在 ~/.lamix/config.yaml 中添加 vision 配置段：\n"
             "vision:\n"
             "  api_key: your_api_key_here\n"
-            "  model: your-vision-model\n"
+            "  name: your-vision-model\n"
             "  base_url: https://your-vision-provider.com/v1/\n"
             "  timeout: 60\n"
             "  max_base64_length: 4000000"
