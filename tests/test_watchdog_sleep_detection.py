@@ -89,16 +89,19 @@ class TestSleepDetection:
         wd = _make_watchdog()
 
         # 第一轮睡眠恢复
-        wd._last_check_time = time.time() - 600
-        now_ts = time.time()
+        base = time.time()
+        wd._last_check_time = base - 600
+        now_ts = base
         gap = now_ts - wd._last_check_time
         if gap > 10 * SLEEP_DETECT_MULTIPLIER:
             wd._sleep_grace_until = now_ts + SLEEP_WAKE_GRACE_PERIOD
         grace1 = wd._sleep_grace_until
 
         # 第二轮睡眠恢复（假设过了很长时间）
-        wd._last_check_time = time.time() - 900
-        now_ts2 = time.time()
+        # 显式给第二轮一个更晚的基准时间：直接连调两次 time.time() 可能在
+        # 同一时钟刻度上返回相同值，导致 grace2 == grace1 的偶发失败
+        now_ts2 = now_ts + 1
+        wd._last_check_time = now_ts2 - 900
         gap2 = now_ts2 - wd._last_check_time
         if gap2 > 10 * SLEEP_DETECT_MULTIPLIER:
             wd._sleep_grace_until = now_ts2 + SLEEP_WAKE_GRACE_PERIOD
