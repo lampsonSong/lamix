@@ -24,14 +24,19 @@ def temp_lamix_dir(tmp_path):
     """用临时目录替代 ~/.lamix 用于测试。"""
     skills_dir = tmp_path / "skills"
     projects_dir = tmp_path / "projects"
+    info_dir = tmp_path / "info"
     skills_dir.mkdir()
     projects_dir.mkdir()
+    info_dir.mkdir()
 
     from src.core.self_audit import scanners, lifecycle
+    import src.core.self_audit as sa_ns
     old_skills = scanners.SKILLS_DIR
     old_projects = scanners.PROJECTS_DIR
+    old_info = sa_ns.INFO_DIR
     scanners.SKILLS_DIR = skills_dir
     scanners.PROJECTS_DIR = projects_dir
+    sa_ns.INFO_DIR = info_dir
     lifecycle.SKILLS_DIR = skills_dir
     lifecycle.PROJECTS_DIR = projects_dir
 
@@ -39,6 +44,7 @@ def temp_lamix_dir(tmp_path):
 
     scanners.SKILLS_DIR = old_skills
     scanners.PROJECTS_DIR = old_projects
+    sa_ns.INFO_DIR = old_info
     lifecycle.SKILLS_DIR = old_skills
     lifecycle.PROJECTS_DIR = old_projects
 
