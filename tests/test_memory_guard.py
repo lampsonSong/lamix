@@ -74,15 +74,38 @@ class TestCheckProjectWrite:
         assert "[拒绝]" in result
         assert "20KB" in result
 
-    def test_new_section_triggers_warning_only(self, projects_dir):
-        """新增『## 更新』式小节只告警不拦截。"""
+    def test_new_section_now_hard_rejected(self, projects_dir):
+        """新增『## 更新』式小节 → 硬拒（2026-10-27 用户定稿：写入治理升级）。"""
         target = projects_dir / "demo.md"
         _write_old(target, 200)
         content = "头部\n\n## 更新 2026-10-25\n\n今天做了 ABC。\n"
         result = memory_guard.check_project_write(target, content)
         assert result is not None
-        assert "[已写入·带告警]" in result
-        assert "追加式小节" in result
+        assert "[拒绝]" in result
+        assert "更新/断点" in result
+
+    def test_append_style_hard_rejected(self, projects_dir):
+        """追加式写入（新内容=旧内容+尾部加料）→ 硬拒，要求整篇重写。"""
+        import os
+        target = projects_dir / "demo2.md"
+        old_text = "# 项目\n\n## 现状\n- 状态 A\n- 状态 B\n" * 1
+        target.write_text(old_text, encoding="utf-8")
+        appended = old_text + "\n## 更新 2026-10-27\n新增流水一段。\n" * 1
+        result = memory_guard.check_project_write(target, appended)
+        assert result is not None
+        assert "[拒绝]" in result
+        assert "追加式" in result
+
+    def test_rewrite_style_passes(self, projects_dir):
+        """整篇重组重写（结构变化、非前缀保留）→ 放行。"""
+        target = projects_dir / "demo3.md"
+        target.write_text("# 项目旧版\n\n## 现状\n- 旧状态\n", encoding="utf-8")
+        rewritten = (
+            "# 项目（状态快照）\n\n## 现状快照\n- 新状态：foo\n\n"
+            "## 进行中\n- bar\n\n## 铁律\n- baz\n"
+        )
+        result = memory_guard.check_project_write(target, rewritten)
+        assert result is None
 
     def test_date_title_triggers_warning(self, projects_dir):
         target = projects_dir / "demo.md"

@@ -74,6 +74,23 @@ def _new_sections(old: str, new: str) -> list[str]:
     ]
 
 
+def _is_append_style(old: str, new: str) -> str | None:
+    """追加式写入判定（2026-10-27 用户定稿：写 projects = 加载全量 → 重组 → 整篇重写）。
+
+    特征：新内容保留旧内容（或其头部 80%）为前缀、只在尾部加料——这是追加，
+    不是重写。返回违规描述（拒写）；None 放行。
+    """
+    o, n = old.strip(), new.strip()
+    if not o or not n or len(n) <= len(o):
+        return None
+    if n.startswith(o):
+        return "新内容=旧内容+尾部追加（前缀完整保留）"
+    head = o[: max(int(len(o) * 0.8), 1)]
+    if n.startswith(head) and len(n) - len(o) > 200:
+        return "旧内容头部 80% 原样保留、仅尾部加料（前缀保留式追加）"
+    return None
+
+
 def _date_titles(content: str) -> list[str]:
     """找出标题里带日期的小节行。"""
     return [m.group(0).strip() for m in _DATE_TITLE_RE.finditer(content)]
@@ -87,7 +104,9 @@ def _format_violation(target: Path, old_size: int, new_size: int, hits: list[str
         f"- 目标：{target}",
         f"- 体积：旧 {old_size / 1024:.1f}KB → 新 {new_size / 1024:.1f}KB（增量 {growth / 1024:+.1f}KB）",
         f"- 命中：{'；'.join(hits)}",
-        "正确做法：",
+        "正确做法（2026-10-27 用户定稿：写入治理）：",
+        "  0) 写 projects 的唯一姿势 = 先加载旧记录全量 → 重组为最新状态快照 → file_write 整篇重写整个文件；",
+        "     禁止任何形式的追加 / 尾部加小节 / shell 直写（open().write、sed -i、>> 重定向都算绕过守卫）；",
         "  1) 原地改写对应槽位（现状快照 / 环境配置 / 架构事实 / 铁律 / 进行中），不要新开『## 更新』『## 断点』式小节；",
         "  2) 过程事件（谁在何时做了什么、监控流水、单次 run 细节）留在 session 历史或 .archived/，主文件只留状态化结论；",
         "  3) 确需大幅改写：先备份到 /tmp，再按固定骨架整篇重写（折叠后通常更小）；",
@@ -124,6 +143,12 @@ def check_project_write(path: Path, content: str) -> str | None:
         hits.append(f"体积 {new_size / 1024:.1f}KB 超 20KB 红线")
     if old and (new_size - old_size) > PROJECT_GROWTH_LIMIT:
         hits.append(f"单次增长 {(new_size - old_size) / 1024:+.1f}KB 超 +3KB 上限")
+    if old and (append_hit := _is_append_style(old, content)):
+        hits.append(f"追加式写入：{append_hit}——必须整篇重写，不是追加")
+    new_update_titles = _new_sections(old, content) if old else []
+    if new_update_titles:
+        hits.append(f"新增『更新/断点』式小节 {len(new_update_titles)} 个："
+                    f"{' / '.join(new_update_titles[:3])}")
 
     if hits:
         return _format_violation(path, old_size, new_size, hits)
