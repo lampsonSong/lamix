@@ -186,6 +186,41 @@ def _get_skill_entry_by_name(name: str) -> dict[str, Any] | None:
     return None
 
 
+_alias_cache: dict[str, Path] | None = None
+
+
+def _resolve_alias_path(name: str) -> Path | None:
+    """别名解析（2026-10-27 skill 族化）：在平铺 skill 文件的 frontmatter aliases 里找旧名 → 族文件。"""
+    global _alias_cache
+    if _alias_cache is None:
+        import re as _re
+        import yaml as _yaml
+        cache: dict[str, Path] = {}
+        if SKILLS_DIR.exists():
+            for md in SKILLS_DIR.glob("*.md"):
+                if md.name.startswith("."):
+                    continue
+                try:
+                    raw = md.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                m = _re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, _re.DOTALL)
+                if not m:
+                    continue
+                try:
+                    meta = _yaml.safe_load(m.group(1)) or {}
+                except _yaml.YAMLError:
+                    continue
+                aliases = meta.get("aliases") or []
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+                for a in aliases:
+                    if isinstance(a, str) and a.strip():
+                        cache[a.strip()] = md
+        _alias_cache = cache
+    return _alias_cache.get(name)
+
+
 def _resolve_skill_path(name: str) -> tuple[Path | None, bool]:
     """解析 skill 名称，返回 (文件路径, 是否子项)。
 
@@ -225,6 +260,10 @@ def _resolve_skill_path(name: str) -> tuple[Path | None, bool]:
     legacy_file = SKILLS_DIR / f"{skill_name}.md"
     if legacy_file.is_file():
         return legacy_file, False
+    # 别名解析：skill 族化后旧名 → 族文件
+    alias_path = _resolve_alias_path(skill_name)
+    if alias_path is not None:
+        return alias_path, False
     return None, False
 
 
@@ -456,6 +495,7 @@ def _refresh_all_indices() -> None:
         # Tools 注册
         from src.core import skills_tools as skills_tools_reg
         from src.tools import session as session_tool
+        skills_tools_reg._alias_cache = None  # skill 文件变更后别名缓存失效
         current_session = session_tool.get_current_session()
         if current_session:
             skills_tools_reg.set_retrieval_indices(

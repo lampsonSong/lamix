@@ -47,6 +47,111 @@ _DATE_MARK_RE = re.compile(r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2})")
 _ARCHIVE_DIR_PREFIX = "."
 
 
+# ── 一个主题一个文件（2026-10-27 用户定稿）─────────────────────────────
+# 记忆库三层：projects=项目状态快照 / info=知识条目 / skills=工作流
+MEMORY_LAYERS = ("projects", "info", "skills")
+# 文件名归一化后缀（复数/常见变体）——归一化后同名视为同主题
+_TOPIC_SUFFIX_RE = re.compile(r"[-_]?(pitfalls?|traps?|lessons?|notes?|tips?|记录|踩坑|坑)$")
+# 新建文件的近名判定阈值（token Jaccard）
+_TOPIC_SIM_THRESHOLD = 0.6
+
+
+def _topic_key(stem: str) -> str:
+    """文件名归一化：去复数与常见变体后缀。"""
+    n = stem.lower()
+    n = _TOPIC_SUFFIX_RE.sub("", n)
+    return n.rstrip("s")
+
+
+def _name_tokens(stem: str) -> set[str]:
+    """文件名 token 集（按 -_. 切分，过短词丢弃）。"""
+    return {w for w in re.split(r"[-_.\s]+", stem.lower()) if len(w) >= 3}
+
+
+def _memory_dir_of(path: Path) -> Path | None:
+    """返回该文件所属的记忆层目录；三层之外返回 None。"""
+    mem_root = (Path.home() / ".lamix" / "memory").resolve()
+    try:
+        rel = path.resolve().relative_to(mem_root)
+    except (ValueError, OSError):
+        return None
+    if len(rel.parts) != 2 or rel.parts[0] not in MEMORY_LAYERS:
+        return None
+    if not rel.parts[1].endswith(".md") or rel.parts[1].startswith("."):
+        return None
+    return mem_root / rel.parts[0]
+
+
+def find_similar_topics(path: Path, content: str = "") -> list[tuple[str, float]]:
+    """在同层目录里找出与目标同主题的已有文件（归一化同名或文件名 token 高度相似）。
+
+    Returns:
+        [(文件名, 相似度), ...]，相似度 1.0 表示归一化后同名。
+    """
+    layer_dir = _memory_dir_of(path)
+    if layer_dir is None or not layer_dir.exists():
+        return []
+    target_key = _topic_key(path.stem)
+    target_tokens = _name_tokens(path.stem)
+    hits: list[tuple[str, float]] = []
+    for other in sorted(layer_dir.glob("*.md")):
+        if other.name.startswith(".") or other.resolve() == path.resolve():
+            continue
+        if _topic_key(other.stem) == target_key:
+            hits.append((other.name, 1.0))
+            continue
+        ot = _name_tokens(other.stem)
+        if not ot or not target_tokens:
+            continue
+        inter = len(ot & target_tokens)
+        if inter < 2:
+            continue
+        sim = inter / len(ot | target_tokens)
+        if sim >= _TOPIC_SIM_THRESHOLD:
+            hits.append((other.name, round(sim, 2)))
+    return sorted(hits, key=lambda x: -x[1])
+
+
+def check_duplicate_topic_write(path: Path, content: str = "") -> str | None:
+    """新建记忆文件时检查是否与已有文件同主题——同主题应合并更新，不应新建。
+
+    仅拦截「新建」（目标文件尚不存在）；已存在文件的整篇重写一律放行。
+    """
+    if _memory_dir_of(path) is None:
+        return None
+    if path.exists():
+        return None
+    hits = find_similar_topics(path, content)
+    if not hits:
+        return None
+    names = "、".join(f"{n}（相似度 {s}）" for n, s in hits[:3])
+    # 2026-10-27 用户反馈：不应只拒绝——应把已有记忆内容一并带回，让调用方就地合并重写
+    excerpts: list[str] = []
+    layer_dir = _memory_dir_of(path)
+    for fname, _s in hits[:2]:
+        if layer_dir is None:
+            break
+        fp = layer_dir / fname
+        try:
+            old_text = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        head = old_text[:3000]
+        excerpts.append(f"──── 已有文件【{fname}】（前 3000 字符，完整内容可再 file_read）────\n{head}")
+    excerpt_block = ("\n\n".join(excerpts) + "\n") if excerpts else ""
+    return (
+        "[拒绝] 记忆库写入被守卫拦截：同主题文件已存在——请合并重写而非新建。\n"
+        f"- 目标：{path}\n"
+        f"- 已存在同主题文件：{names}\n"
+        "正确做法（2026-10-27 用户定稿：尽量合并、保持最新状态）：\n"
+        "  1) 下方已附带最相似文件的内容——把本次新知识并入其对应槽位；\n"
+        "  2) 对该已有文件执行 file_write 整篇重写（覆盖式），保持它是最新的完整状态；\n"
+        "  3) 过程事件（本次谁在何时做了什么）留在 session 历史，不要为它单开文件；\n"
+        "  4) 确实无法并入（主题确实不同）时才新建，并在正文首行写清「这是什么/属于哪/什么时候查」。\n"
+        "\n" + excerpt_block
+    )
+
+
 def is_project_target(path: Path) -> bool:
     """判断路径是否为受守卫管辖的 projects 记录文件。
 

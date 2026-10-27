@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR
 from src.core.self_audit.models import AuditFinding, AuditReport, logger
+from src.core.self_audit.dup_scan import scan_duplicate_knowledge
 from src.core.self_audit.scanners import (
     scan_infos,
     scan_skills,
@@ -80,6 +81,11 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
     findings.extend(scan_projects(auto_fix=auto_fix))
     findings.extend(scan_skill_scripts(auto_fix=auto_fix))
     findings.extend(scan_infos(auto_fix=auto_fix))
+    findings.extend(scan_duplicate_knowledge(
+        projects_dir=PROJECTS_DIR,
+        skills_dir=SKILLS_DIR,
+        info_dir=_sa.INFO_DIR,
+    ))
     findings.extend(scan_user_patterns())
     findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
@@ -245,6 +251,29 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 continue
             fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
+                # 2026-10-27 修复：无 frontmatter 文件（info 层近乎全部）此前被永久跳过，
+                # 过期归档从未生效——改用文件 mtime 兜底判定（30 天未动过的知识条目归档）
+                try:
+                    mtime_date = datetime.fromtimestamp(info_file.stat().st_mtime).date()
+                except OSError:
+                    continue
+                if mtime_date <= stale_30:
+                    if auto_fix:
+                        archive_dir = _info_dir / ".archived"
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                        dest = archive_dir / info_file.name
+                        if dest.exists():
+                            dest = archive_dir / f"{info_file.stem}_{uuid.uuid4().hex[:6]}.md"
+                        shutil.move(str(info_file), str(dest))
+                        findings.append(AuditFinding(
+                            severity="info",
+                            category="info",
+                            target=info_file.stem,
+                            message=f"已归档: 30天未更新（mtime: {mtime_date}，无 frontmatter 兜底判定）",
+                            suggestion="如需恢复，从 .archived/ 目录移回",
+                            fixed=True,
+                            fix_detail=f"移至 {dest}",
+                        ))
                 continue
             try:
                 import yaml
@@ -301,6 +330,20 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 continue
             fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
+                # 2026-10-27 修复：同 info 段——无 frontmatter 的 project 记录用 mtime 兜底
+                # 注意：projects 是状态快照，mtime 只作为「久未更新」的提示，30 天线才归档
+                try:
+                    mtime_date = datetime.fromtimestamp(proj_file.stat().st_mtime).date()
+                except OSError:
+                    continue
+                if mtime_date <= stale_30:
+                    findings.append(AuditFinding(
+                        severity="info",
+                        category="project",
+                        target=proj_file.stem,
+                        message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}，无 frontmatter 兜底）",
+                        suggestion="确认项目是否已完结：完结则归档，活跃则更新快照",
+                    ))
                 continue
             try:
                 import yaml

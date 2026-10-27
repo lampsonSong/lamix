@@ -327,13 +327,13 @@ def scan_projects(auto_fix: bool = False) -> list[AuditFinding]:
                 suggestion="备份旧版到 /tmp 后按固定骨架重写折叠（现状快照→环境配置→架构事实→铁律→进行中）",
             ))
         update_sections = len(re.findall(r"^##\s*(更新|update)\b", content, re.IGNORECASE | re.MULTILINE))
-        if update_sections > 10:
+        if update_sections > 0:
             findings.append(AuditFinding(
                 severity="warning",
                 category="project",
                 target=name,
                 message=f"检测到 {update_sections} 个『## 更新』式追加小节：流水账式记录，与状态快照定位相悖",
-                suggestion="把仍有价值的当前状态折叠进固定骨架板块，删除过程性小节（细节在 session 历史可查）",
+                suggestion="把仍有价值的当前状态折叠进固定骨架板块或统一并入一个『增量事实』节，删除按日期追加的小节（细节在 session 历史可查）",
             ))
 
         code_blocks = re.findall(r"```", content)
@@ -776,6 +776,28 @@ def scan_infos(auto_fix: bool = True) -> list[AuditFinding]:
                     message="info 文件存在未闭合的代码块",
                     suggestion="补齐闭合的 ``` 标记",
                 ))
+
+        # info 是知识条目，不应含『## 更新』式流水小节
+        info_update_sections = len(re.findall(r"^##\s*(更新|update)\b", raw, re.IGNORECASE | re.MULTILINE))
+        if info_update_sections > 0:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="info",
+                target=name,
+                message=f"含 {info_update_sections} 个『## 更新』式小节：知识条目应为主题化常青内容",
+                suggestion="把更新内容并入一个『增量事实』节，删除按日期追加的小节",
+            ))
+
+        # 体积预警（13KB 预警线，20KB 硬红线在 projects 层）
+        info_size_kb = len(raw.encode("utf-8")) / 1024
+        if info_size_kb > 13:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="info",
+                target=name,
+                message=f"文件 {info_size_kb:.0f}KB 超过 13KB 预警线",
+                suggestion="提炼要点、拆分主题或移入 .archived/",
+            ))
 
         # 本地路径失效（/Users/ 开头且不存在；/nas/ 远程路径跳过）
         for local_path in set(re.findall(r"/Users/[^\s`'\"\)\]]+", raw)):

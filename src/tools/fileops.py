@@ -85,6 +85,11 @@ def file_write(path: str, content: str, force: bool = False) -> str:
         if violation:
             logger.warning("[fileops] project write rejected: %s", p)
             return violation
+        # 一个主题一个文件：新建近名文件时提示合并到已有文件（2026-10-27 用户定稿）
+        topic_violation = memory_guard.check_duplicate_topic_write(p, content)
+        if topic_violation:
+            logger.warning("[fileops] duplicate-topic write rejected: %s", p)
+            return topic_violation
     elif memory_guard.is_project_target(p):
         logger.warning("[fileops] project write FORCED (guard bypassed): %s", p)
     try:

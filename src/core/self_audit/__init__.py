@@ -27,6 +27,7 @@ from src.core.self_audit.models import (
     _audit_log,
 )
 from src.core.self_audit.repair import build_repair_prompt, is_memory_finding
+from src.core.self_audit.dup_scan import scan_duplicate_knowledge
 from src.core.self_audit.scanners import (
     scan_infos,
     scan_projects,
@@ -67,6 +68,7 @@ __all__ = [
     "load_report",
     "run_audit",
     "save_report",
+    "scan_duplicate_knowledge",
     "scan_infos",
     "scan_projects",
     "scan_skill_overlap",

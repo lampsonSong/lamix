@@ -168,3 +168,66 @@ class TestFileWriteIntegration:
         target = tmp_path / "note.md"
         result = fileops_tool.file_write(str(target), "z" * (30 * 1024))
         assert "[成功]" in result
+
+
+# ── 一个主题一个文件：近名新建拦截（2026-10-27 用户定稿）─────────────────
+
+class TestDuplicateTopicWrite:
+    def _mk(self, tmp_path, layer="projects", name="demo.md", body="# demo\n\n内容\n"):
+        from pathlib import Path
+        d = tmp_path / ".lamix" / "memory" / layer
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        p.write_text(body, encoding="utf-8")
+        return d, p
+
+    def test_near_name_new_file_rejected(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        d, _ = self._mk(tmp_path, "projects", "git-pager-pitfall.md")
+        new = d / "git-pager.md"
+        violation = memory_guard.check_duplicate_topic_write(new, "# git-pager\n")
+        assert violation is not None
+        assert "合并" in violation
+
+    def test_normalized_same_name_rejected(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        d, _ = self._mk(tmp_path, "info", "subtitle-matching-pitfall.md")
+        new = d / "subtitle-matching-pitfalls.md"
+        violation = memory_guard.check_duplicate_topic_write(new, "# x\n")
+        assert violation is not None
+
+    def test_unrelated_topic_allowed(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        d, _ = self._mk(tmp_path, "projects", "git-pager.md")
+        new = d / "kafka-consumer-lag.md"
+        assert memory_guard.check_duplicate_topic_write(new, "# x\n") is None
+
+    def test_existing_file_rewrite_allowed(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        d, p = self._mk(tmp_path, "projects", "git-pager.md")
+        assert memory_guard.check_duplicate_topic_write(p, "# git-pager\n\n新内容\n") is None
+
+    def test_applies_to_info_and_skills(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        for layer in ("info", "skills"):
+            d, _ = self._mk(tmp_path, layer, "claude-code-dispatch.md")
+            new = d / "claude-code-dispatch-pitfalls.md"
+            assert memory_guard.check_duplicate_topic_write(new, "# x\n") is not None
+
+    def test_non_memory_path_allowed(self, tmp_path, monkeypatch):
+        from src.tools import memory_guard
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        p = tmp_path / "notes" / "git-pager.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        assert memory_guard.check_duplicate_topic_write(p, "# x\n") is None

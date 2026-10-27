@@ -46,6 +46,12 @@ MEMORY_GUIDANCE = (
     "2. 固定骨架：现状快照（HEAD/版本/测试基线）→ 环境配置 → 架构关键事实 → 铁律拍板集 → 进行中/待办\n"
     "3. 写入前三问：是状态还是过程事件？聊天记录找得到吗？三个月后冷启动还用得上吗？——三问任一不过就不写\n"
     "4. 单文件超 20KB 视为失衡：备份旧版到 /tmp 后按骨架重写折叠，禁止继续追加\n"
+    "\n"
+    "**记忆库通用规则（2026-10-27 用户定稿）：一个主题一个文件，尽量合并、保持最新状态**\n"
+    "5. 写入前先查重：三层里已有同主题文件时，一律合并更新那个文件，不新建（守卫会拦截近名新建）\n"
+    "6. 合并 = 把新知识并入已有文件对应槽位后整篇重写，保持该文件是最新完整状态；不是另开新文件\n"
+    "7. 确实无法并入才新建；新建时正文首行必须自明：这是什么 / 属于哪 / 什么时候查它\n"
+    "8. 产出记忆前自问：这条内容已有归属文件吗？能与已有文件合并吗？合并后是否仍清楚？\n"
     "projects 的设计目标 = 新 session 冷启动接手项目所需的最小启动包。\n"
     "\n"
     "用户的性格、称呼、爱好、偏好、纠错等个人特征写在 ~/.lamix/USER.md。\n"
@@ -360,6 +366,31 @@ def _update_project_last_used(path: Path, date_str: str) -> None:
         pass
 
 
+def _resolve_memory_alias(directory: Path, name: str) -> Path | None:
+    """记忆族文件别名解析（2026-10-27 族化配套）：在目录下族文件的 frontmatter aliases 里
+    查旧名 → 族文件路径。info/projects 族化后原文件名进 aliases，按旧名加载不失效。"""
+    import re as _re
+    import yaml as _yaml
+    for md in sorted(directory.glob("*.md")):
+        try:
+            raw = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = _re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, _re.DOTALL)
+        if not m:
+            continue
+        try:
+            meta = _yaml.safe_load(m.group(1)) or {}
+        except _yaml.YAMLError:
+            continue
+        aliases = meta.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if name.lower() in {str(a).strip().lower() for a in aliases}:
+            return md
+    return None
+
+
 def load_project_context(name: str) -> str:
     """加载指定项目的完整上下文（projects/xxx.md 内容）。"""
     if not name:
@@ -392,6 +423,18 @@ def load_project_context(name: str) -> str:
                     return f"# {md_file.stem}\n\n{content}"
             except OSError:
                 pass
+
+    # 别名解析（2026-10-27 族化配套）：旧名 → 族文件
+    alias_path = _resolve_memory_alias(PROJECTS_DIR, name)
+    if alias_path is not None:
+        try:
+            content = alias_path.read_text(encoding="utf-8").strip()
+            if content:
+                _meta, body = _parse_frontmatter(content)
+                return (f"# {alias_path.stem}（「{name}」为别名，已定位到族文件）\n\n"
+                        + (body.strip() or content))
+        except OSError:
+            pass
 
     available = [f.stem for f in PROJECTS_DIR.glob("*.md")]
     avail_str = ", ".join(available) if available else "(none)"
@@ -487,6 +530,17 @@ def load_info(name: str) -> str:
                 return content
             except OSError:
                 pass
+
+    # 别名解析（2026-10-27 族化配套）：旧名 → 族文件
+    alias_path = _resolve_memory_alias(INFO_DIR, name)
+    if alias_path is not None:
+        try:
+            content = alias_path.read_text(encoding="utf-8").strip()
+            _meta, body = _parse_frontmatter(content)
+            return (f"（「{name}」为别名，已定位到族文件 {alias_path.stem}）\n\n"
+                    + (body.strip() or content))
+        except OSError:
+            pass
 
     available = [f.stem for f in INFO_DIR.glob("*.md")]
     avail_str = ", ".join(available) if available else "(none)"
