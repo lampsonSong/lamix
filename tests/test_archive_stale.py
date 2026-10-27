@@ -236,12 +236,12 @@ class TestSkillArchiveRules:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4. Info 归档规则（统一 skill 规则）
+# 4. Info 归档规则（2026-10-27 起：只按 30 天未使用）
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestInfoArchiveRules:
-    """验证 info 的归档规则与 skill 一致。"""
+    """验证 info 的归档规则：只按 30 天未使用归档（2026-10-27 起与 skill 规则分治）。"""
 
     def _setup_and_run(self, tmp_path, meta, anchor=None):
         from src.core.self_audit import cleanup_stale_knowledge
@@ -257,8 +257,13 @@ class TestInfoArchiveRules:
             findings = cleanup_stale_knowledge(auto_fix=True)
         return [f for f in findings if f.category == "info"], info_dir / "test-info.md"
 
-    def test_7days_no_invocation_archived(self, tmp_path):
-        """info 7 天没用且 invocation_count=0，归档。"""
+    def test_7days_no_invocation_kept(self, tmp_path):
+        """info 8 天未读 → 保留（2026-10-27 新语义：info 只按 30 天未使用归档）。
+
+        旧语义是「7 天未用且 invocation_count=0 → 归档」，那是 skills 专属规则。
+        知识条目没有调用次数概念，沿用会在审计补 frontmatter 后把从未被读取的
+        条目 7 天即误杀。
+        """
         anchor = date.today()
         findings, info_file = self._setup_and_run(tmp_path, {
             "name": "unused-info",
@@ -266,9 +271,8 @@ class TestInfoArchiveRules:
             "last_used_at": (anchor - timedelta(days=8)).isoformat(),
             "invocation_count": 0,
         })
-        assert len(findings) == 1
-        assert findings[0].fixed is True
-        assert not info_file.exists()
+        assert len(findings) == 0
+        assert info_file.exists()
 
     def test_7days_has_invocation_kept(self, tmp_path):
         """info 7 天没用但 invocation_count>0，保留。"""
@@ -296,12 +300,12 @@ class TestInfoArchiveRules:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. Project 归档规则（统一 skill 规则）
+# 5. Project 归档规则（2026-10-27 起：只按 30 天未使用）
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestProjectArchiveRules:
-    """验证 project 的归档规则与 skill 一致。"""
+    """验证 project 的归档规则：只按 30 天未使用归档（2026-10-27 起与 skill 规则分治）。"""
 
     def _setup_and_run(self, tmp_path, meta, anchor=None):
         from src.core.self_audit import cleanup_stale_knowledge
@@ -317,8 +321,11 @@ class TestProjectArchiveRules:
             findings = cleanup_stale_knowledge(auto_fix=True)
         return [f for f in findings if f.category == "project"], projects_dir / "test-project.md"
 
-    def test_7days_no_invocation_archived(self, tmp_path):
-        """project 7 天没用且 invocation_count=0，归档。"""
+    def test_7days_no_invocation_kept(self, tmp_path):
+        """project 8 天未读 → 保留（2026-10-27 新语义：project 只按 30 天未使用归档）。
+
+        project 是状态快照，30 天线才归档，避免补 frontmatter 后误杀有效快照。
+        """
         anchor = date.today()
         findings, proj_file = self._setup_and_run(tmp_path, {
             "name": "unused-project",
@@ -326,9 +333,8 @@ class TestProjectArchiveRules:
             "last_used_at": (anchor - timedelta(days=8)).isoformat(),
             "invocation_count": 0,
         })
-        assert len(findings) == 1
-        assert findings[0].fixed is True
-        assert not proj_file.exists()
+        assert len(findings) == 0
+        assert proj_file.exists()
 
     def test_7days_has_invocation_kept(self, tmp_path):
         """project 7 天没用但 invocation_count>0，保留。"""

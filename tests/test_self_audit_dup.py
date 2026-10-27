@@ -30,11 +30,17 @@ def mem_dirs(tmp_path):
 
 class TestScanDuplicateKnowledge:
     def test_name_normalized_duplicate_detected(self, mem_dirs):
+        """2026-10-27 新语义：跨层同名降为 info（治理规则：跨层同名≠重复）；同层仍 warning。"""
         projects, skills, info = mem_dirs
+        # 跨层（project + info）：降为 info
         (projects / "git-pager.md").write_text("# git-pager\n\n非交互 shell pager 挂起\n", encoding="utf-8")
         (info / "git-pagers.md").write_text("# git-pagers\n\n非交互 shell pager 挂起\n", encoding="utf-8")
+        # 同层（projects 内）：仍 warning
+        (projects / "evalr.md").write_text("# evalr\n\n评测\n", encoding="utf-8")
+        (projects / "evalrs.md").write_text("# evalrs\n\n评测\n", encoding="utf-8")
         findings = scan_duplicate_knowledge(projects, skills, info)
-        assert any("归一化后重复" in f.message for f in findings)
+        assert any("跨层同名" in f.message and f.severity == "info" for f in findings)
+        assert any("归一化后重复" in f.message and f.severity == "warning" for f in findings)
 
     def test_content_near_duplicate_detected(self, mem_dirs):
         projects, skills, info = mem_dirs

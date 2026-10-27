@@ -51,6 +51,9 @@ def _collect_files(dirs: list[Path]) -> list[tuple[Path, str, str]]:
                 text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
+            # 2026-10-27：补 frontmatter 后全库都带 name/description/created_at 等共同词，
+            # 不剥离会显著抬高两两 token 相似度 → 误报「内容疑似重复」
+            text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.DOTALL)
             items.append((p, layer, text))
     return items
 
@@ -77,13 +80,26 @@ def scan_duplicate_knowledge(
         if len(group) < 2:
             continue
         names = sorted({f"{layer}/{stem}" for layer, stem in group})
-        findings.append(AuditFinding(
-            severity="warning",
-            category="memory",
-            target=norm,
-            message=f"文件名归一化后重复（{len(names)} 份）：{', '.join(names)}",
-            suggestion="核对内容：重复的合并保留一份，其余移入对应层 .archived/",
-        ))
+        layers = {layer for layer, _ in group}
+        if len(layers) > 1:
+            # 2026-10-27：跨层同名 ≠ 重复（治理规则定稿）——projects=状态快照 /
+            # skills=工作流 / info=知识条目，同名分层各司其职。降为 info 提示，
+            # 不再按 warning 噪声上报；仅当内容也高度重叠才需合并（由第 3 节内容比对兜底）。
+            findings.append(AuditFinding(
+                severity="info",
+                category="memory",
+                target=norm,
+                message=f"跨层同名（{len(names)} 份）：{', '.join(names)}",
+                suggestion="按治理规则跨层同名默认合理（project=状态/skill=工作流），内容重叠才合并",
+            ))
+        else:
+            findings.append(AuditFinding(
+                severity="warning",
+                category="memory",
+                target=norm,
+                message=f"文件名归一化后重复（{len(names)} 份）：{', '.join(names)}",
+                suggestion="核对内容：重复的合并保留一份，其余移入对应层 .archived/",
+            ))
 
     # ── 2. skill 同名 .md 与同名目录并存 ──
     if skills_dir and skills_dir.exists():

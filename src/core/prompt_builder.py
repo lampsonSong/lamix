@@ -461,8 +461,28 @@ def build_info_index() -> str:
     return text
 
 
+def _update_info_last_used(path: Path, date_str: str) -> None:
+    """记录 info 文件的 last_used_at（读取即使用）。
+
+    2026-10-27：info 层此前完全没有使用信号——只有 mtime，无法区分「冷门但有效」
+    和「已废弃」。读取即写回 last_used_at 后，30 天未读才会被归档。
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(raw)
+        if str(meta.get("last_used_at") or "") == date_str:
+            return
+        meta["last_used_at"] = date_str
+        import yaml
+        fm = yaml.dump(meta, allow_unicode=True, default_flow_style=False).strip()
+        path.write_text(f"---\n{fm}\n---\n\n{body.lstrip()}\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def load_info(name: str) -> str:
     """加载 info/xxx.md 内容。"""
+    from datetime import date
     if not name:
         return "info 需要 name 参数，例如：info(name=\"api-reference\")"
 
@@ -477,6 +497,7 @@ def load_info(name: str) -> str:
                 # 去掉 frontmatter
                 _meta, body = _parse_frontmatter(content)
                 if body.strip():
+                    _update_info_last_used(md_file, str(date.today()))
                     return body.strip()
                 return content
             except OSError:
@@ -489,6 +510,7 @@ def load_info(name: str) -> str:
                 content = md_file.read_text(encoding="utf-8").strip()
                 _meta, body = _parse_frontmatter(content)
                 if body.strip():
+                    _update_info_last_used(md_file, str(date.today()))
                     return body.strip()
                 return content
             except OSError:

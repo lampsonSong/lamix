@@ -690,6 +690,113 @@ def scan_user_patterns(days: int = 1) -> list[AuditFinding]:
     return findings
 
 
+_MEMORY_FM_FIELDS = ("name", "description", "created_at", "last_used_at")
+
+
+def _extract_memory_description(body: str, fallback: str) -> str:
+    """从正文提取一句话描述：优先首个 blockquote 行，其次首个非标题正文行。"""
+    for line in body.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith(">"):
+            return s.lstrip("> ").strip()[:200]
+        if s.startswith("#"):
+            continue
+        return s[:200]
+    return fallback[:200]
+
+
+def scan_memory_frontmatter(auto_fix: bool = True) -> list[AuditFinding]:
+    """检查 projects/info 层每个文件的 frontmatter 完整性，缺失时自动补齐。
+
+    规范字段：name / description / created_at / last_used_at。
+    - name         = 文件名（stem）
+    - description  = 正文首个 blockquote 行（没有则取首个正文行）
+    - created_at   = 文件 mtime 日期（无更早证据时的兜底）
+    - last_used_at = 审计确认在册日；已有值不覆盖（真实读取信号优先）
+    """
+    import yaml
+    from datetime import date as _date, datetime as _datetime
+
+    findings: list[AuditFinding] = []
+
+    from src.core import self_audit as _sa
+    layers = [("project", PROJECTS_DIR), ("info", _sa.INFO_DIR)]
+
+    for category, layer_dir in layers:
+        if not layer_dir or not layer_dir.exists():
+            continue
+        for md_file in sorted(layer_dir.glob("*.md")):
+            if ".archived" in md_file.parts or md_file.name.startswith("."):
+                continue
+            try:
+                raw = md_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if not raw.strip():
+                continue
+
+            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+            meta: dict = {}
+            body = raw
+            if fm_match:
+                body = raw[fm_match.end():]
+                try:
+                    meta = yaml.safe_load(fm_match.group(1)) or {}
+                except Exception:
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+
+            missing = [k for k in _MEMORY_FM_FIELDS if not str(meta.get(k) or "").strip()]
+            if not missing:
+                continue
+
+            if not auto_fix:
+                findings.append(AuditFinding(
+                    severity="warning",
+                    category=category,
+                    target=md_file.stem,
+                    message=f"{category} 文件 frontmatter 不完整（缺：{', '.join(missing)}）",
+                    suggestion="补齐 name / description / created_at / last_used_at",
+                ))
+                continue
+
+            try:
+                mtime_date = _datetime.fromtimestamp(md_file.stat().st_mtime).date()
+            except OSError:
+                mtime_date = _date.today()
+
+            new_meta = dict(meta)
+            new_meta.setdefault("name", md_file.stem)
+            if "description" in missing:
+                new_meta["description"] = _extract_memory_description(body, md_file.stem)
+            if "created_at" in missing:
+                new_meta["created_at"] = mtime_date.isoformat()
+            if "last_used_at" in missing:
+                # 审计确认在册日 = 今天（此刻它是活的；真实读取会再刷新）
+                new_meta["last_used_at"] = _date.today().isoformat()
+
+            try:
+                fm = yaml.dump(new_meta, allow_unicode=True, default_flow_style=False,
+                               sort_keys=False).strip()
+            except Exception:
+                continue
+            md_file.write_text(f"---\n{fm}\n---\n\n{body.lstrip()}\n", encoding="utf-8")
+            findings.append(AuditFinding(
+                severity="warning",
+                category=category,
+                target=md_file.stem,
+                message=f"{category} 文件 frontmatter 不完整（缺：{', '.join(missing)}）",
+                suggestion="补齐 name / description / created_at / last_used_at",
+                fixed=True,
+                fix_detail=f"已自动补齐：{', '.join(missing)}",
+            ))
+
+    return findings
+
+
 def scan_infos(auto_fix: bool = True) -> list[AuditFinding]:
     """扫描 memory/info 层的知识文件，返回审计发现列表。
 
@@ -729,8 +836,10 @@ def scan_infos(auto_fix: bool = True) -> list[AuditFinding]:
             ))
             continue
 
-        # 首行缺标题
-        first_line = raw.lstrip().splitlines()[0].strip() if raw.lstrip() else ""
+        # 首行缺标题（跳过 frontmatter——补齐后首行是 "---"，不能当成缺标题；
+        # 更不能把标题插到 frontmatter 前面，那会让 YAML 直接失效）
+        _fm_body = re.sub(r"^---\s*\n.*?\n---\s*\n", "", raw, count=1, flags=re.DOTALL)
+        first_line = _fm_body.lstrip().splitlines()[0].strip() if _fm_body.lstrip() else ""
         if not first_line.startswith("#"):
             if auto_fix:
                 new_content = f"# {name}\n\n{raw}"
@@ -754,7 +863,7 @@ def scan_infos(auto_fix: bool = True) -> list[AuditFinding]:
                 ))
 
         # 未闭合代码块
-        fence_count = raw.count("```")
+        fence_count = _fm_body.count("```")
         if fence_count % 2 == 1:
             if auto_fix:
                 fixed_raw = raw.rstrip("\n") + "\n```"

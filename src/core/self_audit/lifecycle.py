@@ -11,6 +11,7 @@ from src.core.self_audit.models import AuditFinding, AuditReport, logger
 from src.core.self_audit.dup_scan import scan_duplicate_knowledge
 from src.core.self_audit.scanners import (
     scan_infos,
+    scan_memory_frontmatter,
     scan_skills,
     scan_skill_overlap,
     scan_projects,
@@ -87,6 +88,9 @@ def run_audit(auto_fix: bool = True) -> AuditReport:
         info_dir=_sa.INFO_DIR,
     ))
     findings.extend(scan_user_patterns())
+    # 2026-10-27：先补 projects/info 的 frontmatter，再跑归档判据
+    # （否则判据无 last_used_at 可依据，只能退回 mtime 兜底）
+    findings.extend(scan_memory_frontmatter(auto_fix=auto_fix))
     findings.extend(cleanup_stale_knowledge(auto_fix=auto_fix))
 
     duration = time.time() - start
@@ -249,31 +253,23 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 raw = info_file.read_text(encoding="utf-8")
             except OSError:
                 continue
+            try:
+                mtime_date = datetime.fromtimestamp(info_file.stat().st_mtime).date()
+            except OSError:
+                continue
             fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
-                # 2026-10-27 修复：无 frontmatter 文件（info 层近乎全部）此前被永久跳过，
-                # 过期归档从未生效——改用文件 mtime 兜底判定（30 天未动过的知识条目归档）
-                try:
-                    mtime_date = datetime.fromtimestamp(info_file.stat().st_mtime).date()
-                except OSError:
-                    continue
+                # 2026-10-27：无 frontmatter 的条目不再按 mtime 自动归档——mtime 会被任何写入
+                # 刷新，不能代表「多久没用」。改为只报陈旧提示；frontmatter 由审计自动补
+                # （scan_memory_frontmatter），补齐后才具备可判定的使用信号。
                 if mtime_date <= stale_30:
-                    if auto_fix:
-                        archive_dir = _info_dir / ".archived"
-                        archive_dir.mkdir(parents=True, exist_ok=True)
-                        dest = archive_dir / info_file.name
-                        if dest.exists():
-                            dest = archive_dir / f"{info_file.stem}_{uuid.uuid4().hex[:6]}.md"
-                        shutil.move(str(info_file), str(dest))
-                        findings.append(AuditFinding(
-                            severity="info",
-                            category="info",
-                            target=info_file.stem,
-                            message=f"已归档: 30天未更新（mtime: {mtime_date}，无 frontmatter 兜底判定）",
-                            suggestion="如需恢复，从 .archived/ 目录移回",
-                            fixed=True,
-                            fix_detail=f"移至 {dest}",
-                        ))
+                    findings.append(AuditFinding(
+                        severity="info",
+                        category="info",
+                        target=info_file.stem,
+                        message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}，无 frontmatter）",
+                        suggestion="确认知识是否已失效：失效则归档，仍有效则补 frontmatter（审计会自动补）",
+                    ))
                 continue
             try:
                 import yaml
@@ -288,14 +284,21 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             should_archive = False
             reason = ""
             anchor = last_used or created
-            invocation_count = int(meta.get("invocation_count", 0))
 
+            # 2026-10-27：info/project 层不看 invocation_count——那是 skills 专属语义
+            # （知识条目/状态快照没有「调用次数」）。若沿用「7 天未用且 0 调用」规则，
+            # 补了 frontmatter 后，从未被读取过的条目 7 天即被误杀。改为只看 30 天未使用。
             if anchor and anchor <= stale_30:
                 should_archive = True
                 reason = f"30天未使用（最后使用: {anchor}）"
-            elif anchor and anchor <= stale_7 and invocation_count == 0:
-                should_archive = True
-                reason = f"7天未使用且从未被调用（创建于: {created}）"
+            elif mtime_date <= stale_30:
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="info",
+                    target=name,
+                    message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}）",
+                    suggestion="内容可能已过时：确认后更新快照或归档",
+                ))
 
             if should_archive and auto_fix:
                 archive_dir = _info_dir / ".archived"
@@ -310,6 +313,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                     category="info",
                     target=name,
                     message=f"已归档: {reason}",
+                    suggestion="如需恢复，从 .archived/ 目录移回",
                     fixed=True,
                     fix_detail=f"移至 {dest}",
                 ))
@@ -328,20 +332,20 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 raw = proj_file.read_text(encoding="utf-8")
             except OSError:
                 continue
+            try:
+                mtime_date = datetime.fromtimestamp(proj_file.stat().st_mtime).date()
+            except OSError:
+                continue
             fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
             if not fm_match:
-                # 2026-10-27 修复：同 info 段——无 frontmatter 的 project 记录用 mtime 兜底
-                # 注意：projects 是状态快照，mtime 只作为「久未更新」的提示，30 天线才归档
-                try:
-                    mtime_date = datetime.fromtimestamp(proj_file.stat().st_mtime).date()
-                except OSError:
-                    continue
+                # 2026-10-27：同 info 段——无 frontmatter 的 project 记录只报陈旧提示，
+                # 不用 mtime 自动归档（project 是状态快照，需人工判断是否完结）
                 if mtime_date <= stale_30:
                     findings.append(AuditFinding(
                         severity="info",
                         category="project",
                         target=proj_file.stem,
-                        message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}，无 frontmatter 兜底）",
+                        message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}，无 frontmatter）",
                         suggestion="确认项目是否已完结：完结则归档，活跃则更新快照",
                     ))
                 continue
@@ -358,14 +362,19 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
             should_archive = False
             reason = ""
             anchor = last_used or created
-            invocation_count = int(meta.get("invocation_count", 0))
 
+            # 2026-10-27：同 info 层——project 归档只看 30 天未使用
             if anchor and anchor <= stale_30:
                 should_archive = True
                 reason = f"30天未使用（最后使用: {anchor}）"
-            elif anchor and anchor <= stale_7 and invocation_count == 0:
-                should_archive = True
-                reason = f"7天未使用且从未被调用（创建于: {created}）"
+            elif mtime_date <= stale_30:
+                findings.append(AuditFinding(
+                    severity="info",
+                    category="project",
+                    target=name,
+                    message=f"{(date.today() - mtime_date).days} 天未更新（mtime: {mtime_date}）",
+                    suggestion="内容可能已过时：确认项目是否已完结：完结则归档，活跃则更新快照",
+                ))
 
             if should_archive and auto_fix:
                 archive_dir = PROJECTS_DIR / ".archived"
@@ -380,6 +389,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                     category="project",
                     target=name,
                     message=f"已归档: {reason}",
+                    suggestion="如需恢复，从 .archived/ 目录移回",
                     fixed=True,
                     fix_detail=f"移至 {dest}",
                 ))
