@@ -152,6 +152,60 @@ def check_duplicate_topic_write(path: Path, content: str = "") -> str | None:
     )
 
 
+
+
+# ── 明文密码写入守卫（2026-11-05 用户需求：密码入 vault，不上传 LLM）──────────
+# 只抓高置信形态：password/passwd/密码/pwd 赋值行 + 值形似真实密码；
+# vault 键引用、占位符（xxx/TODO/<hidden>）等不拦。
+_SECRET_KW_RE = re.compile(
+    r"(?i)(?:password|passwd|密码|pwd)\s*[\x22\x27]?\s*[:：=]\s*[\x22\x27]?([^\s，。；、\x22\x27]{5,})")
+_SECRET_PLACEHOLDER_RE = re.compile(
+    r"(?i)^(?:vault|见vault|vault键|见 vault|<.*>|\*+|x+|TODO|N/?A|未|无|已存vault|存vault).*$"
+)
+
+
+def check_plaintext_secret_write(path: Path, content: str) -> str | None:
+    """拦截把明文密码写进记忆三层的操作（password/密码/pwd 赋值行）。
+
+    命中返回违规报告（写入中止，由当轮会话改走 vault）；vault 键引用形态
+    放行。只作用于 memory 三层直接子文件，与 _memory_dir_of 判定一致。
+    """
+    layer_dir = _memory_dir_of(path)
+    if layer_dir is None:
+        return None
+    hits: list[str] = []
+    for line in content.splitlines():
+        m = _SECRET_KW_RE.search(line)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        if _SECRET_PLACEHOLDER_RE.match(value):
+            continue
+        # 占位词豁免：全大写下划线词（PASSWORD/PG_PASSWORD 等文档占位形态）
+        if re.fullmatch(r"[A-Z_]{4,}", value):
+            continue
+        # vault 键引用豁免：迁移后的标准形态（含嵌套反引号形态）
+        if "vault键" in value or "vault 键" in value or value.startswith("`"):
+            continue
+        # 高置信形态：字母+数字混合；或纯字母/符号但长度 >=8（API key 常态）。
+        # 纯中文/短词不拦（键名引用误杀由守卫提示的 vault 写法引导修正）。
+        has_alpha = re.search(r"[A-Za-z]", value) is not None
+        has_digit = re.search(r"[0-9]", value) is not None
+        if has_alpha and (has_digit or len(value) >= 8):
+            masked = value[:2] + "***" + value[-1:] if len(value) > 4 else "***"
+            hits.append(f"{line[:60]}...（值 {masked}）" if len(line) > 60
+                        else f"{line}（值 {masked}）")
+    if not hits:
+        return None
+    return (
+        "[拦截] 检测到疑似明文密码写入记忆文件，已中止落盘：\n"
+        + "\n".join(f"  - {h}" for h in hits[:5]) +
+        "\n\n密码请存 vault：`lamix vault set <key>`（值走 stdin），"
+        "记忆文件里只写键名引用（如「密码存 vault 键 xxx」）。\n"
+        "确需明文写入（迁移调试等）可 force=True 豁免，会留日志。"
+    )
+
+
 def is_project_target(path: Path) -> bool:
     """判断路径是否为受守卫管辖的 projects 记录文件。
 

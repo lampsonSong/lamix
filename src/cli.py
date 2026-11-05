@@ -964,6 +964,55 @@ def run_config(args: argparse.Namespace) -> None:
     print_info(f"数据目录: {LAMIX_DIR}")
 
 
+def run_vault(args: argparse.Namespace) -> None:
+    """'lamix vault' 子命令：本地密码保险库（加密存储 + run 注入执行）。
+
+    明文密码不进 LLM context 的两条铁律：
+    - get 仅 TTY 输出（agent shell 无 TTY，取不到明文）
+    - run 注入 LAMIX_SECRET 环境变量后执行命令，密码不出现在命令行与输出
+    """
+    from src import vault
+    from src.vault import VaultError
+
+    try:
+        if args.vault_action == "set":
+            if getattr(args, "stdin", False):
+                value = sys.stdin.readline().rstrip("\n")
+            elif sys.stdin.isatty():
+                import getpass
+                value = getpass.getpass(f"输入 {args.key} 的值（输入不回显）: ")
+            else:
+                value = sys.stdin.readline().rstrip("\n")
+            vault.set_secret(args.key, value)
+            print(f"[vault] 已写入: {args.key}")
+        elif args.vault_action == "get":
+            sys.exit(vault.get_secret_interactive(args.key))
+        elif args.vault_action == "list":
+            keys = vault.list_keys()
+            if keys:
+                print(f"[vault] {len(keys)} 个键:")
+                for k in keys:
+                    print(f"  {k}")
+            else:
+                print("[vault] 空（无任何键）")
+        elif args.vault_action == "del":
+            ok = vault.delete_secret(args.key)
+            print(f"[vault] 已删除: {args.key}" if ok
+                  else f"[vault] 键不存在: {args.key}")
+        elif args.vault_action == "run":
+            sys.exit(vault.run_with_secret(args.key, args.cmd))
+        else:
+            print("用法: lamix vault <set|get|list|del|run> ...")
+            print("  set <key>          写入（stdin/TTY 输入，避免进 shell 历史）")
+            print("  get <key>          输出明文（仅 TTY；agent 侧被拒绝）")
+            print("  list               列键名")
+            print("  del <key>          删除")
+            print("  run <key> -- <cmd> 注入 $LAMIX_SECRET 执行命令（推荐取用姿势）")
+    except VaultError as exc:
+        print(f"[vault] 错误: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lamix",
@@ -1023,6 +1072,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # lamix config
     config_parser = subparsers.add_parser("config", help="显示当前配置")
+
+    # lamix vault
+    vault_parser = subparsers.add_parser(
+        "vault", help="本地密码保险库（加密存储，明文不上传 LLM）")
+    vault_sub = vault_parser.add_subparsers(
+        dest="vault_action", title="vault 子命令")
+    vault_set = vault_sub.add_parser("set", help="写入键（值从 stdin/TTY 输入）")
+    vault_set.add_argument("key")
+    vault_set.add_argument("--stdin", action="store_true",
+                           help="从 stdin 读一行作为值（管道/脚本迁移用）")
+    vault_get = vault_sub.add_parser("get", help="输出明文（仅 TTY 交互）")
+    vault_get.add_argument("key")
+    vault_list = vault_sub.add_parser("list", help="列出全部键名")
+    vault_del = vault_sub.add_parser("del", help="删除键")
+    vault_del.add_argument("key")
+    vault_run = vault_sub.add_parser(
+        "run", help="注入 $LAMIX_SECRET 环境变量执行命令")
+    vault_run.add_argument("key")
+    vault_run.add_argument("cmd", nargs=argparse.REMAINDER, metavar="cmd",
+                           help="命令（建议用 -- 分隔）")
 
     return parser
 
@@ -1108,6 +1177,8 @@ def main() -> None:
         run_update(args)
     elif args.command == "config":
         run_config(args)
+    elif args.command == "vault":
+        run_vault(args)
 
 
 if __name__ == "__main__":
