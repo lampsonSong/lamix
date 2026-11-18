@@ -714,7 +714,11 @@ def scan_memory_frontmatter(auto_fix: bool = True) -> list[AuditFinding]:
     - name         = 文件名（stem）
     - description  = 正文首个 blockquote 行（没有则取首个正文行）
     - created_at   = 文件 mtime 日期（无更早证据时的兜底）
-    - last_used_at = 审计确认在册日；已有值不覆盖（真实读取信号优先）
+    - last_used_at = 文件最后写入日期；已有值不覆盖（真实读取信号优先）
+
+    2026-11-18：last_used_at 补齐值从「审计当天」改为「文件 mtime 日期」。
+    原实现填当天会让每次审计都把归档计时器清零（治理战役 → 永不归档）；
+    真实读取信号另存 sidecar（src/core/memory_usage.py），归档判据只看它。
     """
     import yaml
     from datetime import date as _date, datetime as _datetime
@@ -775,8 +779,10 @@ def scan_memory_frontmatter(auto_fix: bool = True) -> list[AuditFinding]:
             if "created_at" in missing:
                 new_meta["created_at"] = mtime_date.isoformat()
             if "last_used_at" in missing:
-                # 审计确认在册日 = 今天（此刻它是活的；真实读取会再刷新）
-                new_meta["last_used_at"] = _date.today().isoformat()
+                # 2026-11-18：不填「今天」——那等于每次审计都把归档计时器清零
+                # （治理战役整篇重写 → 30 天线永远触发不了）。填文件最后写入日期，
+                # 真实读取信号由 sidecar 单独记录。
+                new_meta["last_used_at"] = mtime_date.isoformat()
 
             try:
                 fm = yaml.dump(new_meta, allow_unicode=True, default_flow_style=False,

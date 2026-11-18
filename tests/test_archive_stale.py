@@ -22,6 +22,14 @@ import pytest
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def _age_file(path: Path, days: int) -> None:
+    """把文件 mtime 设为 days 天前（存量文件语义：这么久没被动过）。"""
+    import os
+    import time
+    ts = time.time() - days * 86400
+    os.utime(path, (ts, ts))
+
+
 def _write_frontmatter(path: Path, meta: dict, body: str = "test body") -> None:
     """写一个带 YAML frontmatter 的 .md 文件。"""
     import yaml
@@ -243,11 +251,13 @@ class TestSkillArchiveRules:
 class TestInfoArchiveRules:
     """验证 info 的归档规则：只按 30 天未使用归档（2026-10-27 起与 skill 规则分治）。"""
 
-    def _setup_and_run(self, tmp_path, meta, anchor=None):
+    def _setup_and_run(self, tmp_path, meta, anchor=None, age_days=None):
         from src.core.self_audit import cleanup_stale_knowledge
 
         skills_dir, projects_dir, info_dir = _make_dirs(tmp_path)
         _write_frontmatter(info_dir / "test-info.md", meta)
+        if age_days is not None:
+            _age_file(info_dir / "test-info.md", days=age_days)
         if anchor is None:
             anchor = date.today()
 
@@ -294,7 +304,7 @@ class TestInfoArchiveRules:
             "created_at": (anchor - timedelta(days=40)).isoformat(),
             "last_used_at": (anchor - timedelta(days=31)).isoformat(),
             "invocation_count": 10,
-        })
+        }, age_days=31)
         assert len(findings) == 1
         assert findings[0].fixed is True
 
@@ -307,11 +317,13 @@ class TestInfoArchiveRules:
 class TestProjectArchiveRules:
     """验证 project 的归档规则：只按 30 天未使用归档（2026-10-27 起与 skill 规则分治）。"""
 
-    def _setup_and_run(self, tmp_path, meta, anchor=None):
+    def _setup_and_run(self, tmp_path, meta, anchor=None, age_days=None):
         from src.core.self_audit import cleanup_stale_knowledge
 
         skills_dir, projects_dir, _ = _make_dirs(tmp_path)
         _write_frontmatter(projects_dir / "test-project.md", meta)
+        if age_days is not None:
+            _age_file(projects_dir / "test-project.md", days=age_days)
         if anchor is None:
             anchor = date.today()
 
@@ -356,6 +368,6 @@ class TestProjectArchiveRules:
             "created_at": (anchor - timedelta(days=40)).isoformat(),
             "last_used_at": (anchor - timedelta(days=31)).isoformat(),
             "invocation_count": 10,
-        })
+        }, age_days=31)
         assert len(findings) == 1
         assert findings[0].fixed is True

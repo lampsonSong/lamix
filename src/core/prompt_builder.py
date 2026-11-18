@@ -23,6 +23,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+from src.core import memory_usage
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR, INFO_DIR
 
 MEMORY_PATH = LAMIX_DIR / "MEMORY.md"
@@ -367,6 +368,40 @@ def _update_project_last_used(path: Path, date_str: str) -> None:
         pass
 
 
+def _format_archived_entry(md_file: Path) -> str:
+    """渲染归档条目（正文 + 已归档提示）。"""
+    try:
+        content = md_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not content:
+        return ""
+    return (
+        f"# {md_file.stem}\n\n"
+        "> ⚠️ 该条目已归档（.archived/），以下是归档时的快照内容；"
+        "需要恢复请把它移回上级目录。\n\n"
+        f"{content}"
+    )
+
+
+def _load_archived_entry(archive_dir: Path, name: str) -> str:
+    """从 .archived/ 回退读取条目内容（归档 ≠ 不可用）。
+
+    2026-11-18：归档判据修好后，projects/info 会真的开始被扫进 .archived/。
+    若归档即「查不到」，知识等于丢了——这里保留按名读取能力并标注已归档。
+    """
+    if not name or not archive_dir.exists():
+        return ""
+    candidates = sorted(archive_dir.glob("*.md"))
+    for md_file in candidates:
+        if md_file.stem.lower() == name.lower():
+            return _format_archived_entry(md_file)
+    for md_file in candidates:
+        if name.lower() in md_file.stem.lower():
+            return _format_archived_entry(md_file)
+    return ""
+
+
 def load_project_context(name: str) -> str:
     """加载指定项目的完整上下文（projects/xxx.md 内容）。"""
     if not name:
@@ -381,9 +416,11 @@ def load_project_context(name: str) -> str:
             try:
                 content = md_file.read_text(encoding="utf-8").strip()
                 if content:
-                    # 更新 last_used_at
+                    # 更新 last_used_at + 记录真实读取信号
+                    # （2026-11-18：归档计时器只认真实读取，写入/治理重写不再重置它）
                     from datetime import date
                     _update_project_last_used(md_file, str(date.today()))
+                    memory_usage.mark_read(PROJECTS_DIR.parent, "projects", md_file.stem)
                     return f"# {md_file.stem}\n\n{content}"
             except OSError:
                 pass
@@ -396,9 +433,14 @@ def load_project_context(name: str) -> str:
                 if content:
                     from datetime import date
                     _update_project_last_used(md_file, str(date.today()))
+                    memory_usage.mark_read(PROJECTS_DIR.parent, "projects", md_file.stem)
                     return f"# {md_file.stem}\n\n{content}"
             except OSError:
                 pass
+
+    archived = _load_archived_entry(PROJECTS_DIR / ".archived", name)
+    if archived:
+        return archived
 
     available = [f.stem for f in PROJECTS_DIR.glob("*.md")]
     avail_str = ", ".join(available) if available else "(none)"
@@ -499,6 +541,8 @@ def load_info(name: str) -> str:
                 _meta, body = _parse_frontmatter(content)
                 if body.strip():
                     _update_info_last_used(md_file, str(date.today()))
+                    # 真实读取信号（2026-11-18）：归档计时器只认真实读取
+                    memory_usage.mark_read(INFO_DIR.parent, "info", md_file.stem)
                     return body.strip()
                 return content
             except OSError:
@@ -512,10 +556,16 @@ def load_info(name: str) -> str:
                 _meta, body = _parse_frontmatter(content)
                 if body.strip():
                     _update_info_last_used(md_file, str(date.today()))
+                    # 真实读取信号（2026-11-18）：归档计时器只认真实读取
+                    memory_usage.mark_read(INFO_DIR.parent, "info", md_file.stem)
                     return body.strip()
                 return content
             except OSError:
                 pass
+
+    archived = _load_archived_entry(INFO_DIR / ".archived", name)
+    if archived:
+        return archived
 
     available = [f.stem for f in INFO_DIR.glob("*.md")]
     avail_str = ", ".join(available) if available else "(none)"

@@ -144,6 +144,11 @@ class TestMemoryArchiveJudgement:
             "created_at": (anchor - timedelta(days=60)).isoformat(),
             "last_used_at": (anchor - timedelta(days=31)).isoformat(),
         }))
+        # 存量语义：文件也这么久没被动过（mtime 参与存量基线）
+        import os
+        import time
+        ts = time.time() - 31 * 86400
+        os.utime(info / "dead.md", (ts, ts))
 
         self._run(projects, info, anchor)
         assert not (info / "dead.md").exists()

@@ -6,6 +6,7 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
+from src.core import memory_usage
 from src.core.config import LAMIX_DIR, SKILLS_DIR, PROJECTS_DIR
 from src.core.self_audit.models import AuditFinding, AuditReport, logger
 from src.core.self_audit.dup_scan import scan_duplicate_knowledge
@@ -177,6 +178,34 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
         except (ValueError, TypeError):
             return None
 
+    def _usage_anchor(memory_dir: Path, layer: str, stem: str, meta: dict,
+                      mtime_date: date) -> tuple[date | None, str]:
+        """projects/info 的归档基准日 = 真实读取信号（sidecar）。
+
+        2026-11-18：原判据用 frontmatter 的 last_used_at，而该字段会被写入事件
+        污染（审计补 frontmatter 填当天、治理战役整篇重写带当天日期），每次战役
+        把计时器清零 → 30 天线从未触发（实测 326 个 project 无一超过 23 天）。
+
+        现在的口径：
+        - sidecar 有读取记录 → 用它（只有 load_project_context / load_info 会写）
+        - sidecar 无记录（存量文件）→ 按历史基线 seed 一次：max(last_used_at,
+          created_at, mtime)，保持原有时间线，既不提前归档也不延后
+        """
+        read_at = memory_usage.get_read_at(memory_dir, layer, stem)
+        if read_at is not None:
+            return read_at, "末次读取"
+        candidates = [
+            _parse_date(meta.get("last_used_at", "")),
+            _parse_date(meta.get("created_at", "")),
+            mtime_date,
+        ]
+        candidates = [c for c in candidates if c is not None]
+        if not candidates:
+            return None, ""
+        baseline = max(candidates)
+        memory_usage.seed_baseline(memory_dir, layer, stem, baseline.isoformat())
+        return baseline, "历史基线"
+
     # ── Skills 清理（平铺 .md 格式 + 子目录 SKILL.md 格式）─
     if SKILLS_DIR.exists():
         for skill_file in SKILLS_DIR.glob("**/*.md"):
@@ -246,6 +275,8 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
         _info_dir = PROJECTS_DIR.parent / "info"
     else:
         _info_dir = LAMIX_DIR / "memory" / "info"
+    # sidecar 所在目录（= memory 根），info 与 projects 共用
+    _memory_dir = _info_dir.parent
 
     if _info_dir.exists():
         for info_file in _info_dir.glob("*.md"):
@@ -278,19 +309,18 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 continue
 
             name = meta.get("name", info_file.stem)
-            last_used = _parse_date(meta.get("last_used_at", ""))
-            created = _parse_date(meta.get("created_at", ""))
 
             should_archive = False
             reason = ""
-            anchor = last_used or created
+            anchor, anchor_src = _usage_anchor(_memory_dir, "info", info_file.stem, meta, mtime_date)
 
             # 2026-10-27：info/project 层不看 invocation_count——那是 skills 专属语义
             # （知识条目/状态快照没有「调用次数」）。若沿用「7 天未用且 0 调用」规则，
             # 补了 frontmatter 后，从未被读取过的条目 7 天即被误杀。改为只看 30 天未使用。
+            # 2026-11-18：锚点进一步改成「真实读取信号」（sidecar），写入不再重置计时器。
             if anchor and anchor <= stale_30:
                 should_archive = True
-                reason = f"30天未使用（最后使用: {anchor}）"
+                reason = f"30天未被读取（{anchor_src}: {anchor}）"
             elif mtime_date <= stale_30:
                 findings.append(AuditFinding(
                     severity="info",
@@ -308,6 +338,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                     import uuid
                     dest = archive_dir / f"{info_file.stem}_{uuid.uuid4().hex[:6]}.md"
                 shutil.move(str(info_file), str(dest))
+                memory_usage.forget(_memory_dir, "info", info_file.stem)
                 findings.append(AuditFinding(
                     severity="info",
                     category="info",
@@ -356,17 +387,16 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                 continue
 
             name = meta.get("name", proj_file.stem)
-            last_used = _parse_date(meta.get("last_used_at", ""))
-            created = _parse_date(meta.get("created_at", ""))
 
             should_archive = False
             reason = ""
-            anchor = last_used or created
+            anchor, anchor_src = _usage_anchor(_memory_dir, "projects", proj_file.stem, meta, mtime_date)
 
             # 2026-10-27：同 info 层——project 归档只看 30 天未使用
+            # 2026-11-18：锚点改成「真实读取信号」（sidecar），写入/治理重写不再重置计时器
             if anchor and anchor <= stale_30:
                 should_archive = True
-                reason = f"30天未使用（最后使用: {anchor}）"
+                reason = f"30天未被读取（{anchor_src}: {anchor}）"
             elif mtime_date <= stale_30:
                 findings.append(AuditFinding(
                     severity="info",
@@ -384,6 +414,7 @@ def cleanup_stale_knowledge(auto_fix: bool = True) -> list[AuditFinding]:
                     import uuid
                     dest = archive_dir / f"{proj_file.stem}_{uuid.uuid4().hex[:6]}.md"
                 shutil.move(str(proj_file), str(dest))
+                memory_usage.forget(_memory_dir, "projects", proj_file.stem)
                 findings.append(AuditFinding(
                     severity="info",
                     category="project",
